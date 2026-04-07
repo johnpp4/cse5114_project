@@ -115,9 +115,9 @@ UNIT_TO_GRAMS = {
     "oz": 28,  "ounce": 28,     "ounces": 28,
     "lb": 454, "pound": 454,    "pounds": 454,
     "g": 1,    "gram": 1,       "grams": 1,
-    "kg": 1000,
-    "l": 1000, "liter": 1000,
-    "ml": 1,   "milliliter": 1,
+    "kg": 1000, "kilogram": 1000, "kilograms": 1000,
+    "l": 1000, "liter": 1000, "liters": 1000,
+    "ml": 1,   "milliliter": 1,  "milliliters": 1
 }
 
 FRACTION_MAP = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 0.333, "⅔": 0.667}
@@ -253,7 +253,7 @@ def poll_feed(feed_meta: dict):
     sent    = 0
     skipped = 0
 
-    for entry in feed.entries:
+    for entry in feed.entries:  # parallelize in future maybe
         title     = entry.get("title", "").strip()
         link      = entry.get("link", "")
         recipe_id = make_recipe_id(title, link)
@@ -289,7 +289,7 @@ def poll_feed(feed_meta: dict):
 def poll_all():
     total_sent    = 0
     total_skipped = 0
-    for feed_meta in RSS_FEEDS:
+    for feed_meta in RSS_FEEDS:     # parallelize maybe
         sent, skipped = poll_feed(feed_meta)
         total_sent    += sent
         total_skipped += skipped

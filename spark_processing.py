@@ -30,6 +30,11 @@ from pyspark.sql.types import (
     StringType, FloatType, ArrayType,
 )
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
+from snowflake.connector.pandas_tools import write_pandas
+
+
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
@@ -37,14 +42,24 @@ from pyspark.sql.types import (
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 KAFKA_TOPIC  = "recipes_raw"
 
-SNOWFLAKE_CONN = {
-    "user":      os.environ["SNOWFLAKE_USER"],
-    "password":  os.environ["SNOWFLAKE_PASSWORD"],
-    "account":   os.environ["SNOWFLAKE_ACCOUNT"],
-    "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
-    "database":  os.environ["SNOWFLAKE_DATABASE"],
-    "schema":    os.environ["SNOWFLAKE_SCHEMA"],
-}
+def get_snowflake_conn():
+    with open(os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"], "rb") as f:
+        private_key = serialization.load_pem_private_key(
+            f.read(), password=None, backend=default_backend()
+        )
+    private_key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    return snowflake.connector.connect(
+        user=os.environ["SNOWFLAKE_USER"],
+        account=os.environ["SNOWFLAKE_ACCOUNT"],
+        warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
+        database=os.environ["SNOWFLAKE_DATABASE"],
+        schema=os.environ["SNOWFLAKE_SCHEMA"],
+        private_key=private_key_bytes,
+    )
 
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/checkpoints/recipes")
 
@@ -64,11 +79,18 @@ spark = (
     .appName("LeftoverToMakeover-Streaming")
     .config(
         "spark.jars.packages",
-        "org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.0",
+        "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0",
     )
-    .config("spark.sql.shuffle.partitions", "4")   # keep it light on a local Mac
+    .config("spark.sql.shuffle.partitions", "4")
+    .config("spark.driver.extraJavaOptions",
+            "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
+            "--add-opens=java.base/java.lang=ALL-UNNAMED")
+    .config("spark.executor.extraJavaOptions",
+            "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
+            "--add-opens=java.base/java.lang=ALL-UNNAMED")
     .getOrCreate()
 )
+
 spark.sparkContext.setLogLevel("WARN")
 logger.info("Spark session started — version %s", spark.version)
 
@@ -126,10 +148,6 @@ parsed = (
 # Snowflake helpers
 # ──────────────────────────────────────────────
 
-def get_snowflake_conn():
-    return snowflake.connector.connect(**SNOWFLAKE_CONN)
-
-
 def run_merge(staging_table: str, target_table: str, merge_keys: list[str], columns: list[str]):
     """Execute a MERGE from staging into target table via snowflake-connector-python."""
     merge_condition = " AND ".join(
@@ -164,47 +182,43 @@ def drop_staging(staging_table: str):
 
 
 def upsert_to_snowflake(batch_df: DataFrame, target_table: str, merge_keys: list[str]):
-    """
-    Write a micro-batch DataFrame to a Snowflake staging table,
-    then MERGE it into the target table, then drop staging.
-    Uses snowflake-connector-python (works with Spark 4.x).
-    """
-    if batch_df.isEmpty():
+    if batch_df.rdd.isEmpty():
         return
 
     staging_table = f"{target_table}_STAGING_{os.getpid()}"
     columns = batch_df.columns
 
-    # Write batch to Snowflake as a staging table via JDBC
-    jdbc_url = (
-        f"jdbc:snowflake://{SNOWFLAKE_CONN['account']}.snowflakecomputing.com"
-        f"/?db={SNOWFLAKE_CONN['database']}"
-        f"&schema={SNOWFLAKE_CONN['schema']}"
-        f"&warehouse={SNOWFLAKE_CONN['warehouse']}"
-    )
+    # Convert Spark DataFrame → pandas → write directly via Python connector
+    pandas_df = batch_df.toPandas()
+    pandas_df.columns = [c.upper() for c in pandas_df.columns]
 
+    conn = get_snowflake_conn()
     try:
-        (
-            batch_df.write
-            .format("jdbc")
-            .option("url", jdbc_url)
-            .option("dbtable", staging_table)
-            .option("user", SNOWFLAKE_CONN["user"])
-            .option("password", SNOWFLAKE_CONN["password"])
-            .option("driver", "net.snowflake.client.jdbc.SnowflakeDriver")
-            .mode("overwrite")
-            .save()
+        # Write staging table
+        write_pandas(
+            conn,
+            pandas_df,
+            staging_table.upper(),
+            auto_create_table=True,
+            overwrite=True,
         )
-        run_merge(staging_table, target_table, merge_keys, columns)
+        # MERGE into target
+        run_merge(staging_table.upper(), target_table.upper(), 
+                  [k.upper() for k in merge_keys], 
+                  list(pandas_df.columns))
     finally:
-        drop_staging(staging_table)
+        try:
+            conn.cursor().execute(f"DROP TABLE IF EXISTS {staging_table.upper()}")
+        except Exception:
+            pass
+        conn.close()
 
 # ──────────────────────────────────────────────
 # Micro-batch processor
 # ──────────────────────────────────────────────
 
 def process_batch(batch_df: DataFrame, batch_id: int):
-    if batch_df.isEmpty():
+    if batch_df.rdd.isEmpty():
         logger.info("Batch %d — empty, skipping", batch_id)
         return
 
@@ -215,8 +229,6 @@ def process_batch(batch_df: DataFrame, batch_id: int):
     recipes_batch = batch_df.select(
         F.col("recipe_id"),
         F.col("title"),
-        F.lit("unknown").alias("cuisine"),
-        F.lit("unknown").alias("meal_type"),
         F.col("rating"),
         F.col("link"),
         F.col("published_at").alias("created_at"),

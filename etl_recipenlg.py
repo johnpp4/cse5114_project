@@ -2,6 +2,9 @@ import pandas as pd
 import hashlib
 import ast
 import re
+import os
+import snowflake.connector
+from snowflake.connector.pandas_tools import write_pandas
 from tqdm import tqdm
 
 # ── CONFIG ──────────────────────────────────────────────
@@ -12,6 +15,59 @@ OUTPUT_RECIPES          = "out_recipes.csv"
 OUTPUT_INGREDIENTS      = "out_ingredients.csv"
 OUTPUT_RECIPE_INGREDS   = "out_recipe_ingredients.csv"
 # ────────────────────────────────────────────────────────
+
+
+# ── SNOWFLAKE CONNECTION ─────────────────────────────────
+
+def get_snowflake_conn():
+    return snowflake.connector.connect(
+        user=os.environ["SNOWFLAKE_USER"],
+        password=os.environ["SNOWFLAKE_PASSWORD"],
+        account=os.environ["SNOWFLAKE_ACCOUNT"],
+        warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
+        database=os.environ["SNOWFLAKE_DATABASE"],
+        schema=os.environ["SNOWFLAKE_SCHEMA"],
+    )
+
+def create_tables(conn):
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recipes (
+            recipe_id   VARCHAR PRIMARY KEY,
+            title       VARCHAR,
+            cuisine     VARCHAR,
+            meal_type   VARCHAR,
+            rating      FLOAT,
+            link        VARCHAR,
+            created_at  VARCHAR
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ingredients (
+            ingredient_id VARCHAR PRIMARY KEY,
+            name          VARCHAR
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recipe_ingredients (
+            recipe_id       VARCHAR,
+            ingredient_id   VARCHAR,
+            quantity_grams  FLOAT,
+            raw_text        VARCHAR,
+            PRIMARY KEY (recipe_id, ingredient_id)
+        )
+    """)
+    cursor.close()
+    print("Tables created (or already exist).")
+
+def upload_to_snowflake(conn, df, table_name):
+    # write_pandas requires uppercase column names
+    df.columns = [c.upper() for c in df.columns]
+    success, nchunks, nrows, _ = write_pandas(conn, df, table_name.upper())
+    if success:
+        print(f"  Uploaded {nrows:,} rows to {table_name.upper()}")
+    else:
+        print(f"  Failed to upload {table_name}")
 
 
 # ── HELPERS ─────────────────────────────────────────────
@@ -88,7 +144,7 @@ print(f"  After dedup: {len(df):,}")
 # ── TRANSFORM ────────────────────────────────────────────
 
 recipes_rows        = []
-ingredients_map     = {}   # ingredient_id → row dict
+ingredients_map     = {}
 recipe_ingreds_rows = []
 
 print("Transforming...")
@@ -134,13 +190,31 @@ for _, row in tqdm(df.iterrows(), total=len(df)):
 
 print("Writing CSVs...")
 
-pd.DataFrame(recipes_rows).to_csv(OUTPUT_RECIPES, index=False)
+recipes_df    = pd.DataFrame(recipes_rows)
+ingredients_df = pd.DataFrame(list(ingredients_map.values()))
+recipe_ingreds_df = pd.DataFrame(recipe_ingreds_rows)
+
+recipes_df.to_csv(OUTPUT_RECIPES, index=False)
 print(f"  {OUTPUT_RECIPES}: {len(recipes_rows):,} rows")
 
-pd.DataFrame(list(ingredients_map.values())).to_csv(OUTPUT_INGREDIENTS, index=False)
+ingredients_df.to_csv(OUTPUT_INGREDIENTS, index=False)
 print(f"  {OUTPUT_INGREDIENTS}: {len(ingredients_map):,} rows")
 
-pd.DataFrame(recipe_ingreds_rows).to_csv(OUTPUT_RECIPE_INGREDS, index=False)
+recipe_ingreds_df.to_csv(OUTPUT_RECIPE_INGREDS, index=False)
 print(f"  {OUTPUT_RECIPE_INGREDS}: {len(recipe_ingreds_rows):,} rows")
 
-print("Done.")
+
+# ── UPLOAD TO SNOWFLAKE ──────────────────────────────────
+
+print("\nConnecting to Snowflake...")
+conn = get_snowflake_conn()
+
+create_tables(conn)
+
+print("Uploading tables...")
+upload_to_snowflake(conn, recipes_df.copy(), "recipes")
+upload_to_snowflake(conn, ingredients_df.copy(), "ingredients")
+upload_to_snowflake(conn, recipe_ingreds_df.copy(), "recipe_ingredients")
+
+conn.close()
+print("\nDone.")

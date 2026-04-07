@@ -7,18 +7,15 @@ import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
 from tqdm import tqdm
 
-# ── CONFIG ──────────────────────────────────────────────
+# configuration
 CSV_PATH = "/Users/cassiephan/Downloads/archive/RecipeNLG_dataset.csv"
 FILTER_SOURCE = "Gathered"
 
 OUTPUT_RECIPES          = "out_recipes.csv"
 OUTPUT_INGREDIENTS      = "out_ingredients.csv"
 OUTPUT_RECIPE_INGREDS   = "out_recipe_ingredients.csv"
-# ────────────────────────────────────────────────────────
 
-
-# ── SNOWFLAKE CONNECTION ─────────────────────────────────
-
+# snowflake connection
 def get_snowflake_conn():
     return snowflake.connector.connect(
         user=os.environ["SNOWFLAKE_USER"],
@@ -35,8 +32,6 @@ def create_tables(conn):
         CREATE TABLE IF NOT EXISTS recipes (
             recipe_id   VARCHAR PRIMARY KEY,
             title       VARCHAR,
-            cuisine     VARCHAR,
-            meal_type   VARCHAR,
             rating      FLOAT,
             link        VARCHAR,
             created_at  VARCHAR
@@ -70,8 +65,7 @@ def upload_to_snowflake(conn, df, table_name):
         print(f"  Failed to upload {table_name}")
 
 
-# ── HELPERS ─────────────────────────────────────────────
-
+# helpers
 def make_recipe_id(title: str, link: str) -> str:
     base = (title + link).encode("utf-8")
     return "rec_" + hashlib.md5(base).hexdigest()[:10]
@@ -122,8 +116,7 @@ def parse_quantity_grams(raw_text: str):
     return round(whole * multiplier, 2)
 
 
-# ── LOAD & CLEAN ─────────────────────────────────────────
-
+# load and clean data
 print("Loading CSV...")
 df = pd.read_csv(CSV_PATH)
 print(f"  Raw rows: {len(df):,}")
@@ -141,7 +134,7 @@ df = df.drop_duplicates(subset="recipe_id")
 print(f"  After dedup: {len(df):,}")
 
 
-# ── TRANSFORM ────────────────────────────────────────────
+# transform data
 
 recipes_rows        = []
 ingredients_map     = {}
@@ -186,8 +179,7 @@ for _, row in tqdm(df.iterrows(), total=len(df)):
             })
 
 
-# ── WRITE CSVs ───────────────────────────────────────────
-
+# write to csvs
 print("Writing CSVs...")
 
 recipes_df    = pd.DataFrame(recipes_rows)
@@ -204,8 +196,7 @@ recipe_ingreds_df.to_csv(OUTPUT_RECIPE_INGREDS, index=False)
 print(f"  {OUTPUT_RECIPE_INGREDS}: {len(recipe_ingreds_rows):,} rows")
 
 
-# ── UPLOAD TO SNOWFLAKE ──────────────────────────────────
-
+# upload to snowflake
 print("\nConnecting to Snowflake...")
 conn = get_snowflake_conn()
 

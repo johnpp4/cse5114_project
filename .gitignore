@@ -1,2 +1,5 @@
 /csvs
 /recipe_ingredients_chunks
+/.venv
+/kafka_2.13-3.9.2
+/*.tgz

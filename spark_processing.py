@@ -1,9 +1,8 @@
 """
-spark_consumer.py
+spark_processing.py
 -----------------
-Leftover to Makeover — Spark Structured Streaming Consumer
-Reads recipe events from Kafka topic `recipes_raw`,
-parses + explodes them, then upserts into three Snowflake tables:
+reads recipe events from Kafka topic `recipes_raw`, parses + explodes them, 
+then upserts into three Snowflake tables:
     • RECIPES
     • INGREDIENTS
     • RECIPE_INGREDIENTS
@@ -11,18 +10,22 @@ parses + explodes them, then upserts into three Snowflake tables:
 Dependencies:
     pip install pyspark snowflake-connector-python
 
-Run with:
-    python spark_consumer.py
+Spark packages (set via --packages or spark.jars.packages):
+    org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0
+    net.snowflake:spark-snowflake_2.13:3.1.0
+    net.snowflake:snowflake-jdbc:3.16.1
 
-Note: Spark 4.x uses Scala 2.13. The Kafka package will be downloaded
-automatically on first run (~30 seconds).
+Run with:
+    python spark_processing.py
 """
 
 import os
-import json
+import base64
 import logging
-import snowflake.connector
-
+ 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
+ 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -30,74 +33,76 @@ from pyspark.sql.types import (
     StringType, FloatType, ArrayType,
 )
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
-from snowflake.connector.pandas_tools import write_pandas
-
-
-# ──────────────────────────────────────────────
-# Configuration
-# ──────────────────────────────────────────────
-
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
-KAFKA_TOPIC  = "recipes_raw"
-
-def get_snowflake_conn():
-    with open(os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"], "rb") as f:
-        private_key = serialization.load_pem_private_key(
-            f.read(), password=None, backend=default_backend()
-        )
-    private_key_bytes = private_key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    return snowflake.connector.connect(
-        user=os.environ["SNOWFLAKE_USER"],
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
-        database=os.environ["SNOWFLAKE_DATABASE"],
-        schema=os.environ["SNOWFLAKE_SCHEMA"],
-        private_key=private_key_bytes,
-    )
-
-CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/checkpoints/recipes")
-
+# logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-logger = logging.getLogger("spark_consumer")
+logger = logging.getLogger("spark_processing")
 
-# ──────────────────────────────────────────────
-# Spark session
-# Spark 4.x = Scala 2.13 → use _2.13 artifact
-# ──────────────────────────────────────────────
+# configuration
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_TOPIC  = "recipes_raw"
+CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/checkpoints/recipes")
 
+def _load_private_key_b64() -> str:
+    key_path = os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"]
+    with open(key_path, "rb") as fh:
+        private_key = serialization.load_pem_private_key(
+            fh.read(),
+            password=None,
+            backend=default_backend(),
+        )
+    der_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return base64.b64encode(der_bytes).decode("utf-8")
+
+SNOWFLAKE_OPTIONS: dict[str, str] = {
+    "sfURL": "sfedu02-unb02139.snowflakecomputing.com",
+    "sfUser": "SPARROW",
+    "sfDatabase": "SPARROW_DB",
+    "sfSchema": "PUBLIC",
+    "sfWarehouse": "SPARROW_WH",
+    # Private-key auth: base64-encoded DER bytes
+    "pem_private_key": _load_private_key_b64(),
+}
+
+SF_FORMAT = "net.snowflake.spark.snowflake"
+
+# spark session
 spark = (
     SparkSession.builder
     .appName("LeftoverToMakeover-Streaming")
     .config(
         "spark.jars.packages",
-        "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0",
+        ",".join([
+            "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0",
+            "net.snowflake:spark-snowflake_2.13:3.1.0",
+            "net.snowflake:snowflake-jdbc:3.16.1",
+        ]),
     )
     .config("spark.sql.shuffle.partitions", "4")
-    .config("spark.driver.extraJavaOptions",
-            "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
-            "--add-opens=java.base/java.lang=ALL-UNNAMED")
-    .config("spark.executor.extraJavaOptions",
-            "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
-            "--add-opens=java.base/java.lang=ALL-UNNAMED")
+    # Required for JPMS modules used by Kafka + JDBC drivers under Java 17+
+    .config(
+        "spark.driver.extraJavaOptions",
+        "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    )
+    .config(
+        "spark.executor.extraJavaOptions",
+        "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    )
     .getOrCreate()
 )
 
 spark.sparkContext.setLogLevel("WARN")
 logger.info("Spark session started — version %s", spark.version)
 
-# ──────────────────────────────────────────────
-# Schema  (mirrors build_event() in ingestion.py)
-# ──────────────────────────────────────────────
-
+# schema
 INGREDIENT_SCHEMA = StructType([
     StructField("ingredient_id",  StringType(), True),
     StructField("name",           StringType(), True),
@@ -122,10 +127,7 @@ EVENT_SCHEMA = StructType([
     StructField("recipe",     RECIPE_SCHEMA, True),
 ])
 
-# ──────────────────────────────────────────────
-# Read stream from Kafka
-# ──────────────────────────────────────────────
-
+# read stream from kafka
 raw_stream = (
     spark.readStream
     .format("kafka")
@@ -136,7 +138,7 @@ raw_stream = (
     .load()
 )
 
-# Parse JSON value bytes → structured columns
+# parse JSON value bytes → structured columns
 parsed = (
     raw_stream
     .select(F.from_json(F.col("value").cast("string"), EVENT_SCHEMA).alias("evt"))
@@ -144,80 +146,70 @@ parsed = (
     .select("evt.recipe.*", F.col("evt.timestamp").alias("ingested_at"))
 )
 
-# ──────────────────────────────────────────────
 # Snowflake helpers
-# ──────────────────────────────────────────────
-
-def run_merge(staging_table: str, target_table: str, merge_keys: list[str], columns: list[str]):
-    """Execute a MERGE from staging into target table via snowflake-connector-python."""
-    merge_condition = " AND ".join(
-        f"t.{k} = s.{k}" for k in merge_keys
+def sf_write(df: DataFrame, table: str) -> None:
+    (
+        df.write
+        .format(SF_FORMAT)
+        .options(**SNOWFLAKE_OPTIONS)
+        .option("dbtable", table)
+        .option("columnMapping", "name")
+        .mode("overwrite")
+        .save()
     )
-    update_cols = [c for c in columns if c not in merge_keys]
+
+def sf_run_sql(sql: str) -> None:
+    Utils = spark._jvm.net.snowflake.spark.snowflake.Utils  # type: ignore[attr-defined]
+    # build a Java Map from Python dict
+    java_map = spark._jvm.scala.collection.JavaConverters.mapAsScalaMapConverter(  # type: ignore[attr-defined]
+        SNOWFLAKE_OPTIONS
+    ).asScala().toMap(
+        spark._jvm.scala.Predef.conforms()  # type: ignore[attr-defined]
+    )
+    Utils.runQuery(java_map, sql)
+
+def merge_sql(staging: str, target: str, merge_keys: list[str], all_columns: list[str]) -> str:
+    on_clause = " AND ".join(f't.{k} = s.{k}' for k in merge_keys)
+    update_cols = [c for c in all_columns if c not in merge_keys]
     update_clause = ", ".join(f"t.{c} = s.{c}" for c in update_cols)
-    insert_cols = ", ".join(columns)
-    insert_vals = ", ".join(f"s.{c}" for c in columns)
-
-    sql = f"""
-        MERGE INTO {target_table} AS t
-        USING {staging_table} AS s
-        ON {merge_condition}
-        WHEN MATCHED THEN UPDATE SET {update_clause}
-        WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+    insert_cols = ", ".join(all_columns)
+    insert_vals = ", ".join(f"s.{c}" for c in all_columns)
+    return f"""
+        MERGE INTO {target} AS t
+        USING {staging} AS s
+        ON {on_clause}
+        WHEN MATCHED THEN
+            UPDATE SET {update_clause}
+        WHEN NOT MATCHED THEN
+            INSERT ({insert_cols}) VALUES ({insert_vals})
     """
-    conn = get_snowflake_conn()
-    try:
-        conn.cursor().execute(sql)
-        logger.info("MERGE into %s complete", target_table)
-    finally:
-        conn.close()
 
-
-def drop_staging(staging_table: str):
-    conn = get_snowflake_conn()
-    try:
-        conn.cursor().execute(f"DROP TABLE IF EXISTS {staging_table}")
-    finally:
-        conn.close()
-
-
-def upsert_to_snowflake(batch_df: DataFrame, target_table: str, merge_keys: list[str]):
-    if batch_df.rdd.isEmpty():
+def upsert_to_snowflake(df: DataFrame, target_table: str, merge_keys: list[str]) -> None:
+    if df.rdd.isEmpty():
         return
+ 
+    # uppercase everything
+    df_upper = df.toDF(*[c.upper() for c in df.columns])
+    all_cols  = df_upper.columns
+    keys_upper = [k.upper() for k in merge_keys]
+ 
+    staging_table = f"{target_table}_STAGING"
+ 
+    # write staging
+    sf_write(df_upper, staging_table)
+    logger.info("Staged %s → %s", target_table, staging_table)
+ 
+    # merge from staging into target using merge keys
+    sql = merge_sql(staging_table, target_table, keys_upper, list(all_cols))
+    sf_run_sql(sql)
+    logger.info("MERGE into %s complete", target_table)
+ 
+    # drop staging
+    sf_run_sql(f"DROP TABLE IF EXISTS {staging_table}")
 
-    staging_table = f"{target_table}_STAGING_{os.getpid()}"
-    columns = batch_df.columns
 
-    # Convert Spark DataFrame → pandas → write directly via Python connector
-    pandas_df = batch_df.toPandas()
-    pandas_df.columns = [c.upper() for c in pandas_df.columns]
-
-    conn = get_snowflake_conn()
-    try:
-        # Write staging table
-        write_pandas(
-            conn,
-            pandas_df,
-            staging_table.upper(),
-            auto_create_table=True,
-            overwrite=True,
-        )
-        # MERGE into target
-        run_merge(staging_table.upper(), target_table.upper(), 
-                  [k.upper() for k in merge_keys], 
-                  list(pandas_df.columns))
-    finally:
-        try:
-            conn.cursor().execute(f"DROP TABLE IF EXISTS {staging_table.upper()}")
-        except Exception:
-            pass
-        conn.close()
-
-# ──────────────────────────────────────────────
-# Micro-batch processor
-# ──────────────────────────────────────────────
-
-def process_batch(batch_df: DataFrame, batch_id: int):
+# micro-batch processor
+def process_batch(batch_df: DataFrame, batch_id: int) -> None:
     if batch_df.rdd.isEmpty():
         logger.info("Batch %d — empty, skipping", batch_id)
         return
@@ -225,53 +217,57 @@ def process_batch(batch_df: DataFrame, batch_id: int):
     count = batch_df.count()
     logger.info("Batch %d — %d recipe(s) received", batch_id, count)
 
-    # ── 1. RECIPES ──────────────────────────────
-    recipes_batch = batch_df.select(
-        F.col("recipe_id"),
-        F.col("title"),
-        F.col("rating"),
-        F.col("link"),
-        F.col("published_at").alias("created_at"),
-        F.col("source"),
-        F.col("published_at"),
-        F.array_join(F.col("tags"), ",").alias("tags"),
-    ).dropDuplicates(["recipe_id"])
+    batch_df.cache()
 
-    # ── 2. INGREDIENTS ──────────────────────────
-    ingredients_batch = (
-        batch_df
-        .select(F.explode("ingredients").alias("ing"))
-        .select(
-            F.col("ing.ingredient_id"),
-            F.col("ing.name"),
-        )
-        .dropDuplicates(["ingredient_id"])
-    )
 
-    # ── 3. RECIPE_INGREDIENTS ───────────────────
-    recipe_ingredients_batch = (
-        batch_df
-        .select("recipe_id", F.explode("ingredients").alias("ing"))
-        .select(
+    try:
+        # recipes
+        recipes_df = batch_df.select(
             F.col("recipe_id"),
-            F.col("ing.ingredient_id"),
-            F.col("ing.quantity_grams"),
-            F.col("ing.raw_text"),
+            F.col("title"),
+            F.col("rating"),
+            F.col("link"),
+            F.col("published_at").alias("created_at"),
+            F.col("source"),
+            F.col("published_at"),
+            F.array_join(F.col("tags"), ",").alias("tags"),
+        ).dropDuplicates(["recipe_id"])
+ 
+        # ingredients
+        ingredients_df = (
+            batch_df
+            .select(F.explode("ingredients").alias("ing"))
+            .select(
+                F.col("ing.ingredient_id"),
+                F.col("ing.name"),
+            )
+            .dropDuplicates(["ingredient_id"])
         )
-        .dropDuplicates(["recipe_id", "ingredient_id"])
-    )
+ 
+        # recipe ingredients
+        recipe_ingredients_df = (
+            batch_df
+            .select("recipe_id", F.explode("ingredients").alias("ing"))
+            .select(
+                F.col("recipe_id"),
+                F.col("ing.ingredient_id"),
+                F.col("ing.quantity_grams"),
+                F.col("ing.raw_text"),
+            )
+            .dropDuplicates(["recipe_id", "ingredient_id"])
+        )
 
-    # ── Write to Snowflake (ingredients first — FK dependency) ──
-    upsert_to_snowflake(ingredients_batch,        "INGREDIENTS",        ["ingredient_id"])
-    upsert_to_snowflake(recipes_batch,            "RECIPES",            ["recipe_id"])
-    upsert_to_snowflake(recipe_ingredients_batch, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])
+        # write to snowflake
+        upsert_to_snowflake(ingredients_df, "INGREDIENTS", ["ingredient_id"])
+        upsert_to_snowflake(recipes_df, "RECIPES", ["recipe_id"])
+        upsert_to_snowflake(recipe_ingredients_df, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])
+
+    finally:
+        batch_df.unpersist()
 
     logger.info("Batch %d — committed to Snowflake", batch_id)
 
-# ──────────────────────────────────────────────
-# Launch streaming query
-# ──────────────────────────────────────────────
-
+# launch streaming query
 query = (
     parsed.writeStream
     .foreachBatch(process_batch)

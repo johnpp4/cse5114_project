@@ -1,9 +1,7 @@
 """
----------------
-Leftover to Makeover — RSS Ingestion Pipeline
-Polls multiple RSS feeds, validates each entry is a real recipe
-by scraping the page with recipe-scrapers, then pushes structured
-events to the Kafka topic `recipes_raw`.
+RSS Ingestion Script:
+polls multiple RSS feeds, validates each entry is a real recipe by scraping the page with recipe-scrapers, 
+then pushes structured events to the Kafka topic `recipes_raw`.
 
 Dependencies:
     pip install feedparser kafka-python recipe-scrapers ingredient-parser-nlp
@@ -23,13 +21,10 @@ from recipe_scrapers import scrape_me
 from recipe_scrapers._exceptions import SchemaOrgException, WebsiteNotImplementedError
 from ingredient_parser import parse_ingredient as nlp_parse
 
-# ──────────────────────────────────────────────
-# Configuration
-# ──────────────────────────────────────────────
-
+# configuration
 KAFKA_BROKER = "localhost:9092"
 TOPIC = "recipes_raw"
-POLL_INTERVAL_SECONDS = 15
+POLL_INTERVAL_SECONDS = 15 # polls feeds every 15 seconds
 
 RSS_FEEDS = [
     {"source": "RecipeTin Eats",     "url": "https://www.recipetineats.com/feed"},
@@ -50,26 +45,17 @@ RSS_FEEDS = [
     {"source": "Serious Eats",       "url": "https://www.seriouseats.com/feeds/all"},
 ]
 
-# ──────────────────────────────────────────────
-# Logging
-# ──────────────────────────────────────────────
-
+# logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("rss_ingestor")
 
-# ──────────────────────────────────────────────
-# Deduplication (in-memory)
-# ──────────────────────────────────────────────
-
+# in-memory de-duplication
 seen_ids: set[str] = set()
 
-# ──────────────────────────────────────────────
-# Kafka producer
-# ──────────────────────────────────────────────
-
+# kafka producer
 producer = None
 
 def get_producer() -> KafkaProducer:
@@ -84,16 +70,12 @@ def get_producer() -> KafkaProducer:
         logger.info("Kafka producer connected to %s", KAFKA_BROKER)
     return producer
 
-# ──────────────────────────────────────────────
-# ID + normalization helpers (matches ETL script)
-# ──────────────────────────────────────────────
 
-# current
+# ID + normalization helpers (matches ETL script)
 def normalize_link(link: str) -> str:
     return re.sub(r"^https?://", "", str(link)).strip("/")
 
 def make_recipe_id(title: str, link: str) -> str:
-    """Deterministic ID — identical logic to ETL script."""
     base = (title + normalize_link(link)).encode("utf-8")
     return "rec_" + hashlib.md5(base).hexdigest()[:10]
 
@@ -104,10 +86,7 @@ def make_ingredient_id(name: str) -> str:
 def canonicalize(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().lower())
 
-# ──────────────────────────────────────────────
-# Quantity parsing (matches ETL script)
-# ──────────────────────────────────────────────
-
+# quantity parsing (matches ETL script)
 UNIT_TO_GRAMS = {
     "c": 240, "cup": 240, "cups": 240,
     "tbsp": 15, "tablespoon": 15, "tablespoons": 15,
@@ -147,10 +126,7 @@ def parse_rating(raw) -> float | None:
         return round(float(m.group(1)), 2) if m else None
     return None
 
-# ──────────────────────────────────────────────
-# Ingredient normalization (matches ETL script)
-# ──────────────────────────────────────────────
-
+# ingredient normalization
 def normalize_ingredients(raw_list: list[str]) -> list[dict]:
     """
     Converts raw scraped ingredient strings into the normalized format
@@ -178,10 +154,7 @@ def normalize_ingredients(raw_list: list[str]) -> list[dict]:
         })
     return result
 
-# ──────────────────────────────────────────────
-# Scraping
-# ──────────────────────────────────────────────
-
+# scraping
 def scrape_recipe(url: str) -> dict | None:
     """
     Attempt to scrape structured recipe data from the article URL.
@@ -202,10 +175,7 @@ def scrape_recipe(url: str) -> dict | None:
         logger.debug("Scrape failed for %s: %s", url, e)
         return None
 
-# ──────────────────────────────────────────────
-# Event builder
-# ──────────────────────────────────────────────
-
+# build event
 def get_rss_tags(entry) -> list[str]:
     return [t.get("term", "") for t in entry.get("tags", []) if t.get("term")]
 
@@ -234,10 +204,7 @@ def build_event(entry, feed_meta: dict, scraped: dict) -> dict:
         }
     }
 
-# ──────────────────────────────────────────────
-# Poll a single feed
-# ──────────────────────────────────────────────
-
+# poll a single feed
 def poll_feed(feed_meta: dict):
     source = feed_meta["source"]
     url    = feed_meta["url"]
@@ -282,10 +249,7 @@ def poll_feed(feed_meta: dict):
     logger.info("%s — %d sent, %d skipped", source, sent, skipped)
     return sent, skipped
 
-# ──────────────────────────────────────────────
-# Poll all feeds
-# ──────────────────────────────────────────────
-
+# poll all feeds
 def poll_all():
     total_sent    = 0
     total_skipped = 0
@@ -296,10 +260,7 @@ def poll_all():
     logger.info("Cycle complete — %d recipes sent, %d articles skipped\n",
                 total_sent, total_skipped)
 
-# ──────────────────────────────────────────────
-# Entrypoint
-# ──────────────────────────────────────────────
-
+# --------------------------------------
 def main():
     logger.info("Starting Leftover-to-Makeover RSS Ingestor")
     logger.info("Feeds: %d | Topic: %s | Poll interval: %ds",

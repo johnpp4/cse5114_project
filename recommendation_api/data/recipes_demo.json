@@ -1,0 +1,227 @@
+{
+  "recipes": [
+    {
+      "recipe_id": "rec_demo_01",
+      "title": "Garlic Butter Chicken Bites",
+      "cuisine": "american",
+      "meal_type": "dinner",
+      "rating": 4.7,
+      "link": "https://example.com/recipes/garlic-butter-chicken",
+      "ingredients": [
+        {"ingredient_id": "ing_chicken", "name": "chicken breast", "raw_text": "1 lb chicken breast, cubed"},
+        {"ingredient_id": "ing_garlic", "name": "garlic", "raw_text": "4 cloves garlic, minced"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "3 tbsp butter"},
+        {"ingredient_id": "ing_parsley", "name": "parsley", "raw_text": "2 tbsp fresh parsley"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_02",
+      "title": "Simple Tomato Pasta",
+      "cuisine": "italian",
+      "meal_type": "dinner",
+      "rating": 4.5,
+      "link": "https://example.com/recipes/tomato-pasta",
+      "ingredients": [
+        {"ingredient_id": "ing_pasta", "name": "pasta", "raw_text": "12 oz spaghetti"},
+        {"ingredient_id": "ing_tomato", "name": "tomato", "raw_text": "1 can crushed tomatoes"},
+        {"ingredient_id": "ing_garlic", "name": "garlic", "raw_text": "3 cloves garlic"},
+        {"ingredient_id": "ing_olive_oil", "name": "olive oil", "raw_text": "3 tbsp olive oil"},
+        {"ingredient_id": "ing_basil", "name": "basil", "raw_text": "fresh basil"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_03",
+      "title": "Greek Salad Bowl",
+      "cuisine": "greek",
+      "meal_type": "lunch",
+      "rating": 4.6,
+      "link": "https://example.com/recipes/greek-salad",
+      "ingredients": [
+        {"ingredient_id": "ing_cucumber", "name": "cucumber", "raw_text": "1 cucumber, diced"},
+        {"ingredient_id": "ing_tomato", "name": "tomato", "raw_text": "2 tomatoes, chopped"},
+        {"ingredient_id": "ing_feta", "name": "feta cheese", "raw_text": "4 oz feta, crumbled"},
+        {"ingredient_id": "ing_olive_oil", "name": "olive oil", "raw_text": "2 tbsp olive oil"},
+        {"ingredient_id": "ing_oregano", "name": "oregano", "raw_text": "1 tsp dried oregano"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_04",
+      "title": "Vegetable Stir Fry",
+      "cuisine": "chinese",
+      "meal_type": "dinner",
+      "rating": 4.4,
+      "link": "https://example.com/recipes/stir-fry",
+      "ingredients": [
+        {"ingredient_id": "ing_broccoli", "name": "broccoli", "raw_text": "2 cups broccoli florets"},
+        {"ingredient_id": "ing_carrot", "name": "carrot", "raw_text": "2 carrots, sliced"},
+        {"ingredient_id": "ing_soy_sauce", "name": "soy sauce", "raw_text": "2 tbsp soy sauce"},
+        {"ingredient_id": "ing_ginger", "name": "ginger", "raw_text": "1 tbsp ginger, grated"},
+        {"ingredient_id": "ing_garlic", "name": "garlic", "raw_text": "2 cloves garlic"},
+        {"ingredient_id": "ing_sesame_oil", "name": "sesame oil", "raw_text": "1 tsp sesame oil"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_05",
+      "title": "Classic Pancakes",
+      "cuisine": "american",
+      "meal_type": "breakfast",
+      "rating": 4.8,
+      "link": "https://example.com/recipes/pancakes",
+      "ingredients": [
+        {"ingredient_id": "ing_flour", "name": "flour", "raw_text": "1 1/2 cups flour"},
+        {"ingredient_id": "ing_milk", "name": "milk", "raw_text": "1 1/4 cups milk"},
+        {"ingredient_id": "ing_egg", "name": "egg", "raw_text": "2 eggs"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "3 tbsp melted butter"},
+        {"ingredient_id": "ing_sugar", "name": "sugar", "raw_text": "2 tbsp sugar"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_06",
+      "title": "Chocolate Chip Cookies",
+      "cuisine": "american",
+      "meal_type": "dessert",
+      "rating": 4.9,
+      "link": "https://example.com/recipes/cookies",
+      "ingredients": [
+        {"ingredient_id": "ing_flour", "name": "flour", "raw_text": "2 1/4 cups flour"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "1 cup butter, softened"},
+        {"ingredient_id": "ing_sugar", "name": "sugar", "raw_text": "3/4 cup sugar"},
+        {"ingredient_id": "ing_brown_sugar", "name": "brown sugar", "raw_text": "3/4 cup brown sugar"},
+        {"ingredient_id": "ing_egg", "name": "egg", "raw_text": "2 eggs"},
+        {"ingredient_id": "ing_chocolate", "name": "chocolate chips", "raw_text": "2 cups chocolate chips"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_07",
+      "title": "Lemon Garlic Shrimp",
+      "cuisine": "mediterranean",
+      "meal_type": "dinner",
+      "rating": 4.6,
+      "link": "https://example.com/recipes/shrimp",
+      "ingredients": [
+        {"ingredient_id": "ing_shrimp", "name": "shrimp", "raw_text": "1 lb shrimp, peeled"},
+        {"ingredient_id": "ing_lemon", "name": "lemon", "raw_text": "1 lemon, juice and zest"},
+        {"ingredient_id": "ing_garlic", "name": "garlic", "raw_text": "4 cloves garlic"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "2 tbsp butter"},
+        {"ingredient_id": "ing_parsley", "name": "parsley", "raw_text": "2 tbsp parsley"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_08",
+      "title": "Mushroom Risotto",
+      "cuisine": "italian",
+      "meal_type": "dinner",
+      "rating": 4.5,
+      "link": "https://example.com/recipes/risotto",
+      "ingredients": [
+        {"ingredient_id": "ing_rice", "name": "arborio rice", "raw_text": "1 1/2 cups arborio rice"},
+        {"ingredient_id": "ing_mushroom", "name": "mushroom", "raw_text": "8 oz mushrooms, sliced"},
+        {"ingredient_id": "ing_broth", "name": "chicken broth", "raw_text": "4 cups warm broth"},
+        {"ingredient_id": "ing_onion", "name": "onion", "raw_text": "1 small onion, diced"},
+        {"ingredient_id": "ing_parmesan", "name": "parmesan", "raw_text": "1/2 cup parmesan"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "2 tbsp butter"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_09",
+      "title": "Avocado Toast",
+      "cuisine": "american",
+      "meal_type": "breakfast",
+      "rating": 4.3,
+      "link": "https://example.com/recipes/avocado-toast",
+      "ingredients": [
+        {"ingredient_id": "ing_bread", "name": "bread", "raw_text": "2 slices sourdough"},
+        {"ingredient_id": "ing_avocado", "name": "avocado", "raw_text": "1 ripe avocado"},
+        {"ingredient_id": "ing_lemon", "name": "lemon", "raw_text": "squeeze of lemon"},
+        {"ingredient_id": "ing_egg", "name": "egg", "raw_text": "optional fried egg"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_10",
+      "title": "Beef Tacos",
+      "cuisine": "mexican",
+      "meal_type": "dinner",
+      "rating": 4.7,
+      "link": "https://example.com/recipes/tacos",
+      "ingredients": [
+        {"ingredient_id": "ing_beef", "name": "ground beef", "raw_text": "1 lb ground beef"},
+        {"ingredient_id": "ing_onion", "name": "onion", "raw_text": "1 onion, diced"},
+        {"ingredient_id": "ing_tomato", "name": "tomato", "raw_text": "2 tomatoes"},
+        {"ingredient_id": "ing_cheese", "name": "cheddar cheese", "raw_text": "1 cup shredded cheddar"},
+        {"ingredient_id": "ing_tortilla", "name": "tortilla", "raw_text": "8 small tortillas"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_11",
+      "title": "Caprese Skewers",
+      "cuisine": "italian",
+      "meal_type": "lunch",
+      "rating": 4.5,
+      "link": "https://example.com/recipes/caprese",
+      "ingredients": [
+        {"ingredient_id": "ing_tomato", "name": "tomato", "raw_text": "cherry tomatoes"},
+        {"ingredient_id": "ing_mozzarella", "name": "mozzarella", "raw_text": "fresh mozzarella balls"},
+        {"ingredient_id": "ing_basil", "name": "basil", "raw_text": "fresh basil leaves"},
+        {"ingredient_id": "ing_olive_oil", "name": "olive oil", "raw_text": "drizzle olive oil"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_12",
+      "title": "Banana Smoothie",
+      "cuisine": "american",
+      "meal_type": "breakfast",
+      "rating": 4.2,
+      "link": "https://example.com/recipes/smoothie",
+      "ingredients": [
+        {"ingredient_id": "ing_banana", "name": "banana", "raw_text": "2 frozen bananas"},
+        {"ingredient_id": "ing_milk", "name": "milk", "raw_text": "1 cup milk"},
+        {"ingredient_id": "ing_yogurt", "name": "yogurt", "raw_text": "1/2 cup yogurt"},
+        {"ingredient_id": "ing_honey", "name": "honey", "raw_text": "1 tbsp honey"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_13",
+      "title": "Thai Coconut Curry",
+      "cuisine": "thai",
+      "meal_type": "dinner",
+      "rating": 4.8,
+      "link": "https://example.com/recipes/curry",
+      "ingredients": [
+        {"ingredient_id": "ing_chicken", "name": "chicken breast", "raw_text": "1 lb chicken, sliced"},
+        {"ingredient_id": "ing_coconut_milk", "name": "coconut milk", "raw_text": "1 can coconut milk"},
+        {"ingredient_id": "ing_curry_paste", "name": "curry paste", "raw_text": "2 tbsp red curry paste"},
+        {"ingredient_id": "ing_ginger", "name": "ginger", "raw_text": "1 tbsp ginger"},
+        {"ingredient_id": "ing_garlic", "name": "garlic", "raw_text": "3 cloves garlic"},
+        {"ingredient_id": "ing_broccoli", "name": "broccoli", "raw_text": "2 cups broccoli"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_14",
+      "title": "French Omelette",
+      "cuisine": "french",
+      "meal_type": "breakfast",
+      "rating": 4.4,
+      "link": "https://example.com/recipes/omelette",
+      "ingredients": [
+        {"ingredient_id": "ing_egg", "name": "egg", "raw_text": "3 eggs"},
+        {"ingredient_id": "ing_butter", "name": "butter", "raw_text": "1 tbsp butter"},
+        {"ingredient_id": "ing_cheese", "name": "cheddar cheese", "raw_text": "2 tbsp grated cheese"},
+        {"ingredient_id": "ing_parsley", "name": "parsley", "raw_text": "chopped parsley"}
+      ]
+    },
+    {
+      "recipe_id": "rec_demo_15",
+      "title": "Berry Yogurt Parfait",
+      "cuisine": "american",
+      "meal_type": "breakfast",
+      "rating": 4.3,
+      "link": "https://example.com/recipes/parfait",
+      "ingredients": [
+        {"ingredient_id": "ing_yogurt", "name": "yogurt", "raw_text": "2 cups Greek yogurt"},
+        {"ingredient_id": "ing_berries", "name": "berries", "raw_text": "1 cup mixed berries"},
+        {"ingredient_id": "ing_honey", "name": "honey", "raw_text": "2 tbsp honey"},
+        {"ingredient_id": "ing_granola", "name": "granola", "raw_text": "1/2 cup granola"}
+      ]
+    }
+  ]
+}

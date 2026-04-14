@@ -62,10 +62,10 @@ def _load_private_key_b64() -> str:
 
 SNOWFLAKE_OPTIONS: dict[str, str] = {
     "sfURL": "sfedu02-unb02139.snowflakecomputing.com",
-    "sfUser": "SPARROW",
-    "sfDatabase": "SPARROW_DB",
+    "sfUser": "SPIDER",
+    "sfDatabase": "SPIDER_DB",
     "sfSchema": "PUBLIC",
-    "sfWarehouse": "SPARROW_WH",
+    "sfWarehouse": "SPIDER_WH",
     # Private-key auth: base64-encoded DER bytes
     "pem_private_key": _load_private_key_b64(),
 }
@@ -159,13 +159,13 @@ def sf_write(df: DataFrame, table: str) -> None:
     )
 
 def sf_run_sql(sql: str) -> None:
-    Utils = spark._jvm.net.snowflake.spark.snowflake.Utils  # type: ignore[attr-defined]
-    # build a Java Map from Python dict
-    java_map = spark._jvm.scala.collection.JavaConverters.mapAsScalaMapConverter(  # type: ignore[attr-defined]
-        SNOWFLAKE_OPTIONS
-    ).asScala().toMap(
-        spark._jvm.scala.Predef.conforms()  # type: ignore[attr-defined]
-    )
+    Utils = spark._jvm.net.snowflake.spark.snowflake.Utils
+
+    # convert Python dict to Java HashMap
+    java_map = spark._jvm.java.util.HashMap()
+    for k, v in SNOWFLAKE_OPTIONS.items():
+        java_map.put(k, v)
+
     Utils.runQuery(java_map, sql)
 
 def merge_sql(staging: str, target: str, merge_keys: list[str], all_columns: list[str]) -> str:

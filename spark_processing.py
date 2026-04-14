@@ -98,7 +98,7 @@ spark = (
     )
     .getOrCreate()
 )
-
+spark.conf.set("spark.sql.streaming.metricsEnabled", "false")
 spark.sparkContext.setLogLevel("WARN")
 logger.info("Spark session started — version %s", spark.version)
 
@@ -219,7 +219,9 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
 
     batch_df.cache()
 
-
+    batch_df = batch_df.withColumn(
+            "ingredients",
+            F.coalesce(F.col("ingredients"), F.array()))
     try:
         # recipes
         recipes_df = batch_df.select(
@@ -236,7 +238,7 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         # ingredients
         ingredients_df = (
             batch_df
-            .select(F.explode("ingredients").alias("ing"))
+            .select(F.explode_outer("ingredients").alias("ing"))
             .select(
                 F.col("ing.ingredient_id"),
                 F.col("ing.name"),
@@ -247,7 +249,7 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         # recipe ingredients
         recipe_ingredients_df = (
             batch_df
-            .select("recipe_id", F.explode("ingredients").alias("ing"))
+            .select("recipe_id", F.explode_outer("ingredients").alias("ing"))
             .select(
                 F.col("recipe_id"),
                 F.col("ing.ingredient_id"),

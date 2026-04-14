@@ -132,7 +132,6 @@ def normalize_ingredients(raw_list: list[str]) -> list[dict]:
     Converts raw scraped ingredient strings into the normalized format
     the ETL script produces — ingredient_id, name, quantity_grams, raw_text.
     """
-    seen = set()
     result = []
     for raw in raw_list:
         try:
@@ -141,11 +140,8 @@ def normalize_ingredients(raw_list: list[str]) -> list[dict]:
         except Exception:
             name = ""
         if not name:
-            continue
+            name = raw.strip().lower()
         iid = make_ingredient_id(name)
-        if iid in seen:
-            continue
-        seen.add(iid)
         result.append({
             "ingredient_id":  iid,
             "name":           name,

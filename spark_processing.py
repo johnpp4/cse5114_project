@@ -22,6 +22,7 @@ Run with:
 import os
 import base64
 import logging
+import snowflake.connector
  
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
@@ -147,6 +148,32 @@ parsed = (
 )
 
 # Snowflake helpers
+def _get_snowflake_conn() -> snowflake.connector.SnowflakeConnection:
+    pkb = base64.b64decode(SNOWFLAKE_OPTIONS["pem_private_key"])
+    account = SNOWFLAKE_OPTIONS["sfURL"].replace(".snowflakecomputing.com", "")
+    return snowflake.connector.connect(
+        user=SNOWFLAKE_OPTIONS["sfUser"],
+        account=account,
+        private_key=pkb,
+        database=SNOWFLAKE_OPTIONS["sfDatabase"],
+        schema=SNOWFLAKE_OPTIONS["sfSchema"],
+        warehouse=SNOWFLAKE_OPTIONS["sfWarehouse"],
+    )
+
+def fetch_existing_links() -> set[str]:
+    try:
+        conn = _get_snowflake_conn()
+        cur  = conn.cursor()
+        cur.execute("SELECT LINK FROM RECIPES WHERE LINK IS NOT NULL")
+        links = {row[0] for row in cur.fetchall()}
+        cur.close()
+        conn.close()
+        logger.info("Fetched %d existing links from RECIPES", len(links))
+        return links
+    except Exception as e:
+        logger.warning("Could not fetch existing links (table may not exist yet): %s", e)
+        return set()
+
 def sf_write(df: DataFrame, table: str) -> None:
     (
         df.write
@@ -160,12 +187,10 @@ def sf_write(df: DataFrame, table: str) -> None:
 
 def sf_run_sql(sql: str) -> None:
     Utils = spark._jvm.net.snowflake.spark.snowflake.Utils
-
     # convert Python dict to Java HashMap
     java_map = spark._jvm.java.util.HashMap()
     for k, v in SNOWFLAKE_OPTIONS.items():
         java_map.put(k, v)
-
     Utils.runQuery(java_map, sql)
 
 def merge_sql(staging: str, target: str, merge_keys: list[str], all_columns: list[str]) -> str:
@@ -186,6 +211,7 @@ def merge_sql(staging: str, target: str, merge_keys: list[str], all_columns: lis
 
 def upsert_to_snowflake(df: DataFrame, target_table: str, merge_keys: list[str]) -> None:
     if df.rdd.isEmpty():
+        logger.info("  %s — nothing to upsert, skipping", target_table)
         return
  
     # uppercase everything
@@ -218,21 +244,44 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
     logger.info("Batch %d — %d recipe(s) received", batch_id, count)
 
     batch_df.cache()
+    cached_df = batch_df  # hold reference to the cached version
 
     batch_df = batch_df.withColumn(
             "ingredients",
             F.coalesce(F.col("ingredients"), F.array()))
     try:
+        # drop recipes whose link already exists in Snowflake ──
+        existing_links = fetch_existing_links()
+ 
+        if existing_links:
+            existing_broadcast = spark.sparkContext.broadcast(existing_links)
+ 
+            @F.udf(returnType="boolean")
+            def is_new_link(link: str) -> bool:
+                return link is not None and link not in existing_broadcast.value
+ 
+            batch_df = batch_df.filter(is_new_link(F.col("link")))
+ 
+        if batch_df.rdd.isEmpty():
+            logger.info("Batch %d — all recipes already exist in Snowflake, skipping writes", batch_id)
+            return
+ 
+        new_count = batch_df.count()
+        logger.info("Batch %d — %d new recipe(s) after idempotency filter", batch_id, new_count)
+
         # recipes
         recipes_df = batch_df.select(
             F.col("recipe_id"),
             F.col("title"),
             F.col("rating"),
             F.col("link"),
-            F.col("published_at").alias("created_at"),
+            F.col("ingested_at").alias("created_at"),
             F.col("source"),
             F.col("published_at"),
-            F.array_join(F.col("tags"), ",").alias("tags"),
+            F.when(
+                F.size(F.col("tags")) > 0,
+                F.array_join(F.col("tags"), ",")
+            ).otherwise(F.lit(None)).alias("tags"),  
         ).dropDuplicates(["recipe_id"])
  
         # ingredients
@@ -265,7 +314,7 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         upsert_to_snowflake(recipe_ingredients_df, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])
 
     finally:
-        batch_df.unpersist()
+        cached_df.unpersist()
 
     logger.info("Batch %d — committed to Snowflake", batch_id)
 

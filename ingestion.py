@@ -4,8 +4,7 @@ polls multiple RSS feeds, validates each entry is a real recipe by scraping the 
 then pushes structured events to the Kafka topic `recipes_raw`.
 
 Dependencies:
-#     pip install feedparser kafka-python recipe-scrapers spacy
-#     python -m spacy download en_core_web_sm
+#   pip install feedparser kafka-python recipe-scrapers ingredient-parser-nlp
 """
 
 import json
@@ -13,7 +12,6 @@ import hashlib
 import time
 import logging
 import re
-import spacy
 from datetime import datetime, timezone
 
 import feedparser
@@ -21,6 +19,7 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from recipe_scrapers import scrape_me
 from recipe_scrapers._exceptions import SchemaOrgException, WebsiteNotImplementedError
+from ingredient_parser import parse_ingredient as nlp_parse
 
 # configuration
 KAFKA_BROKER = "localhost:9092"
@@ -54,32 +53,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rss_ingestor")
 
-
-nlp_model = spacy.load("en_core_web_sm")
-
-MEASUREMENT_UNITS = {
-    "cup", "cups", "tablespoon", "tablespoons", "tbsp", "teaspoon", "teaspoons",
-    "tsp", "pound", "pounds", "lb", "lbs", "ounce", "ounces", "oz", "gram",
-    "grams", "g", "kg", "ml", "liter", "liters", "pinch", "clove", "cloves",
-    "slice", "slices", "package", "packages", "can", "cans", "bunch", "head",
-    "quart", "quarts", "pint", "pints", "gallon", "gallons", "stick", "sticks",
-    "dash", "handful", "sprig", "sprigs", "piece", "pieces", "bag", "bags", "spoonful", 
-    "spoonfuls", "knob", "drop", "drops", "sheet", "sheets", "jar", "jars", "box", "boxes", 
-    "strip", "strips", "fillet", "fillets", "rack", "racks", "bulb", "bulbs", "sprinkle", "sprinkles"
-}
-
-PREP_WORDS = {
-    "chopped", "diced", "minced", "sliced", "grated", "shredded", "crushed",
-    "frozen", "fresh", "dried", "cooked", "raw", "peeled", "halved", "cubed",
-    "softened", "melted", "divided", "optional", "thawed", "rinsed", "drained",
-    "trimmed", "pitted", "seeded", "deveined", "butterflied", "scored",
-    "toasted", "roasted", "sauteed", "blanched", "beaten", "sifted", "packed",
-    "heaping", "level", "rounded", "large", "medium", "small", "finely",
-    "roughly", "coarsely", "thinly", "thick", "thin", "skinless", "boneless", "deboned", "deseeded", "quartered", "julienned",
-    "crumbled", "torn", "separated", "room", "temperature", "firmly", "lightly", "well", "about", "approximately", "plus", "extra",
-    "lean", "fat", "free", "reduced", "low", "sodium", "unsalted", "salted",
-    "uncooked", "leftover", "homemade", "store", "bought", "such", "preferably",
-}
+SERVING_PHRASES = frozenset({
+    "for serving", "for garnish", "for topping", "for dipping",
+    "for drizzling", "to serve"
+})
 
 # in-memory de-duplication
 seen_ids: set[str] = set()
@@ -100,7 +77,7 @@ def get_producer() -> KafkaProducer:
     return producer
 
 
-# ID + normalization helpers (matches ETL script)
+# ID + normalization helpers
 def normalize_link(link: str) -> str:
     return re.sub(r"^https?://", "", str(link)).strip("/")
 
@@ -116,44 +93,65 @@ def canonicalize(name: str) -> str:
     name = re.sub(r"[^\w\s-]", "", name)
     return re.sub(r"\s+", " ", name.strip().lower())
 
-
-def extract_name_spacy(raw_text: str) -> str:
-    cleaned = re.sub(r"\(.*?\)", "", raw_text).strip()
-
-    # drop prep instructions that follow a comma --> ok do we need to do this?
-    cleaned = cleaned.split(",")[0].strip()
-
-    doc = nlp_model(cleaned)
-    for token in doc:
-        # ROOT is the syntactic head of the sentence; nsubj is the nominal
-        # subject — both reliably point to the ingredient noun
-        if token.dep_ in ("ROOT", "nsubj") and token.pos_ == "NOUN":
-            parts = [token.text]
-
-            for child in token.children:
-                is_measurement = child.text.lower() in MEASUREMENT_UNITS
-                is_prep_adj = (
-                    child.dep_ == "amod"
-                    and child.text.lower() in PREP_WORDS
-                )
-
-                if child.dep_ in ("compound", "amod") and not is_measurement and not is_prep_adj:
-                    parts.insert(0, child.text)
-
-            return canonicalize(" ".join(parts))
-
-    return ""
-
 # ingredient normalization
+def strip_brand_names(name: str) -> str:
+    words = name.split()
+    if len(words) <= 1:
+        return name
+    # keep first word even if capitalized, strip subsequent capitalized words
+    filtered = [words[0]] + [w for w in words[1:] if not w[0].isupper()]
+    return " ".join(filtered) if filtered else name
+
+def is_serving_line(raw: str) -> bool:
+    lower = raw.lower()
+    return any(phrase in lower for phrase in SERVING_PHRASES)
+    
+def preprocess_ingredient(raw: str) -> str:
+    # strip parentheticals
+    raw = re.sub(r"\(.*?\)", "", raw).strip()
+
+    # strip "room temperature"
+    raw = re.sub(r"\bat\s+room\s+temperature\b", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"\broom\s+temperature\b", "", raw, flags=re.IGNORECASE).strip()
+
+    # handle "a X of Y" vague quantifiers
+    raw = re.sub(r"^a\s+(handful|pinch|splash|drizzle|dash|bit|few|couple)\s+of\s+",
+                 "", raw, flags=re.IGNORECASE).strip()
+
+    if " or " in raw.lower():
+        raw = raw.split(" or ")[0].strip()
+
+    # handle "of" constructions — skip "cream of X" patterns
+    if " of " in raw.lower() and not re.search(r"cream of|out of|instead of", raw.lower()):
+        parts = raw.split(" of ", 1)
+        thing = re.sub(r"[\d¼½¾⅓⅔]+", "", parts[-1]).strip().rstrip("s")
+        descriptor = parts[0].strip()
+        raw = f"{thing} {descriptor}".strip()
+
+    return raw
+
 def normalize_ingredients(raw_list: list[str]) -> list[dict]:
     result = []
     for raw in raw_list:
-        name = extract_name_spacy(raw)
-        if not name:
+        if raw.count(",") >= 2 or is_serving_line(raw):
+            logger.debug("Skipping serving/multi-item line: %s", raw)
+            continue
+
+        name = ""
+        try:
+            preprocessed = preprocess_ingredient(raw)
+            parsed = nlp_parse(preprocessed)
+            name = canonicalize(strip_brand_names(parsed.get("name", "")))
+
+        except Exception as e:
+            logger.debug("NLP parse failed for '%s': %s", raw, e)
+
+        # fallback to raw string
+        if not name or len(name.split()) > 5:
             name = raw.strip().lower()
-        iid = make_ingredient_id(name)
+
         result.append({
-            "ingredient_id": iid,
+            "ingredient_id": make_ingredient_id(name),
             "name":          name,
             "raw_text":      raw.strip(),
         })
@@ -258,7 +256,6 @@ def poll_all():
     logger.info("Cycle complete — %d recipes sent, %d articles skipped\n",
                 total_sent, total_skipped)
 
-# --------------------------------------
 def main():
     logger.info("Starting Leftover-to-Makeover RSS Ingestor")
     logger.info("Feeds: %d | Topic: %s | Poll interval: %ds",

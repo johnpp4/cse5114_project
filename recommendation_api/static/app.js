@@ -1,34 +1,10 @@
 (function () {
   const form = document.getElementById("search-form");
   const ingredientsEl = document.getElementById("ingredients");
-  const cuisineEl = document.getElementById("cuisine");
-  const mealEl = document.getElementById("meal_type");
   const statusEl = document.getElementById("status");
   const parsedEl = document.getElementById("parsed");
   const resultsEl = document.getElementById("results");
   const submitBtn = document.getElementById("submit-btn");
-
-  async function loadFilters() {
-    try {
-      const r = await fetch("/api/filters");
-      if (!r.ok) return;
-      const data = await r.json();
-      for (const c of data.cuisines || []) {
-        const opt = document.createElement("option");
-        opt.value = c;
-        opt.textContent = c.charAt(0).toUpperCase() + c.slice(1);
-        cuisineEl.appendChild(opt);
-      }
-      for (const m of data.meal_types || []) {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m.charAt(0).toUpperCase() + m.slice(1);
-        mealEl.appendChild(opt);
-      }
-    } catch (_) {
-      /* filters optional */
-    }
-  }
 
   function esc(s) {
     const d = document.createElement("div");
@@ -49,7 +25,7 @@
     if (!items.length) {
       const li = document.createElement("li");
       li.className = "empty";
-      li.textContent = "No recipes match those filters. Try broader ingredients or clear cuisine/meal.";
+      li.textContent = "No recipes match those ingredients. Try broader ingredients.";
       resultsEl.appendChild(li);
       return;
     }
@@ -102,8 +78,6 @@
 
     const body = {
       ingredients: ingredientsEl.value,
-      cuisine: cuisineEl.value || null,
-      meal_type: mealEl.value || null,
       limit: 30,
       min_score: 0,
     };
@@ -135,5 +109,4 @@
     }
   });
 
-  loadFilters();
 })();

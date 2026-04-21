@@ -7,7 +7,7 @@ then upserts into two Snowflake tables:
     • RECIPE_INGREDIENTS
 
 Dependencies:
-    pip install pyspark snowflake-connector-python
+    pip install pyspark snowflake-connector-python python-dotenv
 
 Spark packages (set via --packages or spark.jars.packages):
     org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0
@@ -32,6 +32,9 @@ from pyspark.sql.types import (
     StructType, StructField,
     StringType, ArrayType,
 )
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # logging
 logging.basicConfig(
@@ -61,12 +64,11 @@ def _load_private_key_b64() -> str:
     return base64.b64encode(der_bytes).decode("utf-8")
 
 SNOWFLAKE_OPTIONS: dict[str, str] = {
-    "sfURL": "sfedu02-unb02139.snowflakecomputing.com",
-    "sfUser": "SPIDER",
-    "sfDatabase": "SPIDER_DB",
-    "sfSchema": "PUBLIC",
-    "sfWarehouse": "SPIDER_WH",
-    # Private-key auth: base64-encoded DER bytes
+    "sfURL":      f"{os.environ['SNOWFLAKE_ACCOUNT']}.snowflakecomputing.com",
+    "sfUser":     os.environ["SNOWFLAKE_USER"],
+    "sfDatabase": os.environ["SNOWFLAKE_DATABASE"],
+    "sfSchema":   os.environ["SNOWFLAKE_SCHEMA"],
+    "sfWarehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
     "pem_private_key": _load_private_key_b64(),
 }
 

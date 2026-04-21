@@ -12,12 +12,15 @@ Required environment variables (matches .env in repo root):
     SNOWFLAKE_DATABASE
     SNOWFLAKE_SCHEMA
     SNOWFLAKE_WAREHOUSE
-    SNOWFLAKE_PRIVATE_KEY_PATH     absolute path to your RSA private key (.p8)
+    SNOWFLAKE_PRIVATE_KEY_PATH     path to your RSA private key (.p8), absolute or relative to project root
+    or SNOWFLAKE_PRIVATE_KEY       PEM key content directly
+    or SNOWFLAKE_PRIVATE_KEY_B64   Base64-encoded PEM key content
     SNOWFLAKE_PRIVATE_KEY_PASSPHRASE  passphrase if key is encrypted (optional)
 """
 
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 from cryptography.hazmat.primitives.serialization import (
@@ -31,13 +34,61 @@ from cryptography.hazmat.backends import default_backend
 import snowflake.connector
 from snowflake.connector import DictCursor
 
+_REQUIRED_SNOWFLAKE_ENV = (
+    "SNOWFLAKE_ACCOUNT",
+    "SNOWFLAKE_USER",
+    "SNOWFLAKE_DATABASE",
+    "SNOWFLAKE_SCHEMA",
+    "SNOWFLAKE_WAREHOUSE",
+)
+
+
+def validate_snowflake_env() -> None:
+    missing = [name for name in _REQUIRED_SNOWFLAKE_ENV if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(
+            "Missing required Snowflake environment variables: "
+            + ", ".join(missing)
+        )
+
+    has_key_source = any(
+        os.environ.get(name)
+        for name in (
+            "SNOWFLAKE_PRIVATE_KEY_B64",
+            "SNOWFLAKE_PRIVATE_KEY",
+            "SNOWFLAKE_PRIVATE_KEY_PATH",
+        )
+    )
+    if not has_key_source:
+        raise RuntimeError(
+            "Missing Snowflake private key configuration. Set one of "
+            "SNOWFLAKE_PRIVATE_KEY_B64, SNOWFLAKE_PRIVATE_KEY, or "
+            "SNOWFLAKE_PRIVATE_KEY_PATH."
+        )
+
 
 def _load_private_key() -> bytes:
-    key_path = os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"]
+    key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH")
+    key_pem_inline = os.environ.get("SNOWFLAKE_PRIVATE_KEY")
+    key_pem_b64 = os.environ.get("SNOWFLAKE_PRIVATE_KEY_B64")
     passphrase_raw = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
     passphrase = passphrase_raw.encode() if passphrase_raw else None
 
-    pem_data = Path(key_path).read_bytes()
+    if key_pem_b64:
+        pem_data = base64.b64decode(key_pem_b64)
+    elif key_pem_inline:
+        pem_data = key_pem_inline.encode()
+    elif key_path:
+        candidate = Path(key_path).expanduser()
+        if not candidate.is_absolute():
+            project_root = Path(__file__).resolve().parent.parent
+            candidate = project_root / candidate
+        pem_data = candidate.read_bytes()
+    else:
+        raise KeyError(
+            "Set one of SNOWFLAKE_PRIVATE_KEY_B64, SNOWFLAKE_PRIVATE_KEY, or "
+            "SNOWFLAKE_PRIVATE_KEY_PATH."
+        )
     private_key = load_pem_private_key(pem_data, password=passphrase, backend=default_backend())
 
     return private_key.private_bytes(

@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .engine import parse_user_ingredients, recommend
-from .query_snowflake import fetch_candidates, fetch_filters
+from .query_snowflake import fetch_candidates, validate_snowflake_env
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +39,21 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _validate_env_on_startup():
+    try:
+        validate_snowflake_env()
+    except RuntimeError as exc:
+        logger.error("Snowflake configuration error: %s", exc)
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 
 class RecommendBody(BaseModel):
     ingredients: str = Field(..., description="Comma-separated ingredients you have")
-    cuisine: Optional[str] = None
-    meal_type: Optional[str] = None
     limit: int = Field(10, ge=1, le=100)
     min_score: float = Field(0.0, ge=0.0, le=1.0)
 
@@ -56,8 +63,6 @@ def _scored_to_dict(s):
     return {
         "recipe_id":            r.get("recipe_id"),
         "title":                r.get("title"),
-        "cuisine":              r.get("cuisine"),
-        "meal_type":            r.get("meal_type"),
         "rating":               r.get("rating"),
         "link":                 r.get("link"),
         "match_score":          s.match_score,
@@ -76,19 +81,9 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/api/filters")
-def filters():
-    try:
-        return fetch_filters()
-    except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
-
-
 @app.get("/api/recommend")
 def recommend_get(
     q: str = Query(..., description="Ingredients, comma-separated"),
-    cuisine: Optional[str] = None,
-    meal_type: Optional[str] = None,
     limit: int = Query(10, ge=1, le=100),
     min_score: float = Query(0.0, ge=0.0, le=1.0),
 ):
@@ -96,7 +91,7 @@ def recommend_get(
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient in `q`")
     try:
-        candidates = fetch_candidates(phrases, cuisine=cuisine, meal_type=meal_type)
+        candidates = fetch_candidates(phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
@@ -110,7 +105,7 @@ def recommend_post(body: RecommendBody):
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient")
     try:
-        candidates = fetch_candidates(phrases, cuisine=body.cuisine, meal_type=body.meal_type)
+        candidates = fetch_candidates(phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 

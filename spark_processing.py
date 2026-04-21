@@ -2,9 +2,8 @@
 spark_processing.py
 -----------------
 reads recipe events from Kafka topic `recipes_raw`, parses + explodes them, 
-then upserts into three Snowflake tables:
+then upserts into two Snowflake tables:
     • RECIPES
-    • INGREDIENTS
     • RECIPE_INGREDIENTS
 
 Dependencies:
@@ -31,7 +30,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField,
-    StringType, FloatType, ArrayType,
+    StringType, ArrayType,
 )
 
 # logging
@@ -107,7 +106,6 @@ logger.info("Spark session started — version %s", spark.version)
 INGREDIENT_SCHEMA = StructType([
     StructField("ingredient_id",  StringType(), True),
     StructField("name",           StringType(), True),
-    StructField("quantity_grams", FloatType(),  True),
     StructField("raw_text",       StringType(), True),
 ])
 
@@ -117,8 +115,6 @@ RECIPE_SCHEMA = StructType([
     StructField("link",         StringType(), True),
     StructField("source",       StringType(), True),
     StructField("published_at", StringType(), True),
-    StructField("tags",         ArrayType(StringType()), True),
-    StructField("rating",       FloatType(),  True),
     StructField("ingredients",  ArrayType(INGREDIENT_SCHEMA), True),
 ])
 
@@ -273,27 +269,11 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         recipes_df = batch_df.select(
             F.col("recipe_id"),
             F.col("title"),
-            F.col("rating"),
             F.col("link"),
             F.col("ingested_at").alias("created_at"),
             F.col("source"),
             F.col("published_at"),
-            F.when(
-                F.size(F.col("tags")) > 0,
-                F.array_join(F.col("tags"), ",")
-            ).otherwise(F.lit(None)).alias("tags"),  
         ).dropDuplicates(["recipe_id"])
- 
-        # ingredients
-        ingredients_df = (
-            batch_df
-            .select(F.explode_outer("ingredients").alias("ing"))
-            .select(
-                F.col("ing.ingredient_id"),
-                F.col("ing.name"),
-            )
-            .dropDuplicates(["ingredient_id"])
-        )
  
         # recipe ingredients
         recipe_ingredients_df = (
@@ -302,14 +282,13 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
             .select(
                 F.col("recipe_id"),
                 F.col("ing.ingredient_id"),
-                F.col("ing.quantity_grams"),
+                F.col("ing.name"),
                 F.col("ing.raw_text"),
             )
             .dropDuplicates(["recipe_id", "ingredient_id"])
         )
 
         # write to snowflake
-        upsert_to_snowflake(ingredients_df, "INGREDIENTS", ["ingredient_id"])
         upsert_to_snowflake(recipes_df, "RECIPES", ["recipe_id"])
         upsert_to_snowflake(recipe_ingredients_df, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])
 

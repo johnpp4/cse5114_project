@@ -4,7 +4,8 @@ polls multiple RSS feeds, validates each entry is a real recipe by scraping the 
 then pushes structured events to the Kafka topic `recipes_raw`.
 
 Dependencies:
-    pip install feedparser kafka-python recipe-scrapers ingredient-parser-nlp
+#     pip install feedparser kafka-python recipe-scrapers spacy
+#     python -m spacy download en_core_web_sm
 """
 
 import json
@@ -12,6 +13,7 @@ import hashlib
 import time
 import logging
 import re
+import spacy
 from datetime import datetime, timezone
 
 import feedparser
@@ -19,12 +21,12 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from recipe_scrapers import scrape_me
 from recipe_scrapers._exceptions import SchemaOrgException, WebsiteNotImplementedError
-from ingredient_parser import parse_ingredient as nlp_parse
 
 # configuration
 KAFKA_BROKER = "localhost:9092"
 TOPIC = "recipes_raw"
 POLL_INTERVAL_SECONDS = 15 # polls feeds every 15 seconds
+
 
 RSS_FEEDS = [
     {"source": "RecipeTin Eats",     "url": "https://www.recipetineats.com/feed"},
@@ -51,6 +53,33 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("rss_ingestor")
+
+
+nlp_model = spacy.load("en_core_web_sm")
+
+MEASUREMENT_UNITS = {
+    "cup", "cups", "tablespoon", "tablespoons", "tbsp", "teaspoon", "teaspoons",
+    "tsp", "pound", "pounds", "lb", "lbs", "ounce", "ounces", "oz", "gram",
+    "grams", "g", "kg", "ml", "liter", "liters", "pinch", "clove", "cloves",
+    "slice", "slices", "package", "packages", "can", "cans", "bunch", "head",
+    "quart", "quarts", "pint", "pints", "gallon", "gallons", "stick", "sticks",
+    "dash", "handful", "sprig", "sprigs", "piece", "pieces", "bag", "bags", "spoonful", 
+    "spoonfuls", "knob", "drop", "drops", "sheet", "sheets", "jar", "jars", "box", "boxes", 
+    "strip", "strips", "fillet", "fillets", "rack", "racks", "bulb", "bulbs", "sprinkle", "sprinkles"
+}
+
+PREP_WORDS = {
+    "chopped", "diced", "minced", "sliced", "grated", "shredded", "crushed",
+    "frozen", "fresh", "dried", "cooked", "raw", "peeled", "halved", "cubed",
+    "softened", "melted", "divided", "optional", "thawed", "rinsed", "drained",
+    "trimmed", "pitted", "seeded", "deveined", "butterflied", "scored",
+    "toasted", "roasted", "sauteed", "blanched", "beaten", "sifted", "packed",
+    "heaping", "level", "rounded", "large", "medium", "small", "finely",
+    "roughly", "coarsely", "thinly", "thick", "thin", "skinless", "boneless", "deboned", "deseeded", "quartered", "julienned",
+    "crumbled", "torn", "separated", "room", "temperature", "firmly", "lightly", "well", "about", "approximately", "plus", "extra",
+    "lean", "fat", "free", "reduced", "low", "sodium", "unsalted", "salted",
+    "uncooked", "leftover", "homemade", "store", "bought", "such", "preferably",
+}
 
 # in-memory de-duplication
 seen_ids: set[str] = set()
@@ -84,69 +113,49 @@ def make_ingredient_id(name: str) -> str:
     return "ing_" + slug
 
 def canonicalize(name: str) -> str:
+    name = re.sub(r"[^\w\s-]", "", name)
     return re.sub(r"\s+", " ", name.strip().lower())
 
-# quantity parsing (matches ETL script)
-UNIT_TO_GRAMS = {
-    "c": 240, "cup": 240, "cups": 240,
-    "tbsp": 15, "tablespoon": 15, "tablespoons": 15,
-    "tsp": 5,  "teaspoon": 5,   "teaspoons": 5,
-    "oz": 28,  "ounce": 28,     "ounces": 28,
-    "lb": 454, "pound": 454,    "pounds": 454,
-    "g": 1,    "gram": 1,       "grams": 1,
-    "kg": 1000, "kilogram": 1000, "kilograms": 1000,
-    "l": 1000, "liter": 1000, "liters": 1000,
-    "ml": 1,   "milliliter": 1,  "milliliters": 1
-}
 
-FRACTION_MAP = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 0.333, "⅔": 0.667}
+def extract_name_spacy(raw_text: str) -> str:
+    cleaned = re.sub(r"\(.*?\)", "", raw_text).strip()
 
-def parse_quantity_grams(raw_text: str):
-    text = raw_text.lower().strip()
-    for sym, val in FRACTION_MAP.items():
-        text = text.replace(sym, str(val))
-    m = re.match(r"(\d+(?:\.\d+)?)\s*(?:/\s*(\d+))?\s*([a-z\.]+)?", text)
-    if not m:
-        return None
-    whole = float(m.group(1))
-    if m.group(2):
-        whole = whole / float(m.group(2))
-    unit = (m.group(3) or "").rstrip(".")
-    multiplier = UNIT_TO_GRAMS.get(unit)
-    return round(whole * multiplier, 2) if multiplier else None
+    # drop prep instructions that follow a comma --> ok do we need to do this?
+    cleaned = cleaned.split(",")[0].strip()
 
-def parse_rating(raw) -> float | None:
-    """Normalize rating to plain float regardless of source format."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return round(float(raw), 2)
-    if isinstance(raw, str):
-        m = re.search(r"(\d+(?:\.\d+)?)", raw)
-        return round(float(m.group(1)), 2) if m else None
-    return None
+    doc = nlp_model(cleaned)
+    for token in doc:
+        # ROOT is the syntactic head of the sentence; nsubj is the nominal
+        # subject — both reliably point to the ingredient noun
+        if token.dep_ in ("ROOT", "nsubj") and token.pos_ == "NOUN":
+            parts = [token.text]
+
+            for child in token.children:
+                is_measurement = child.text.lower() in MEASUREMENT_UNITS
+                is_prep_adj = (
+                    child.dep_ == "amod"
+                    and child.text.lower() in PREP_WORDS
+                )
+
+                if child.dep_ in ("compound", "amod") and not is_measurement and not is_prep_adj:
+                    parts.insert(0, child.text)
+
+            return canonicalize(" ".join(parts))
+
+    return ""
 
 # ingredient normalization
 def normalize_ingredients(raw_list: list[str]) -> list[dict]:
-    """
-    Converts raw scraped ingredient strings into the normalized format
-    the ETL script produces — ingredient_id, name, quantity_grams, raw_text.
-    """
     result = []
     for raw in raw_list:
-        try:
-            parsed = nlp_parse(raw)
-            name = canonicalize(parsed.name.text) if parsed.name else ""
-        except Exception:
-            name = ""
+        name = extract_name_spacy(raw)
         if not name:
             name = raw.strip().lower()
         iid = make_ingredient_id(name)
         result.append({
-            "ingredient_id":  iid,
-            "name":           name,
-            "quantity_grams": parse_quantity_grams(raw),
-            "raw_text":       raw.strip(),
+            "ingredient_id": iid,
+            "name":          name,
+            "raw_text":      raw.strip(),
         })
     return result
 
@@ -163,17 +172,12 @@ def scrape_recipe(url: str) -> dict | None:
             return None
         return {
             "ingredients": ingredients,
-            "rating":      scraper.ratings(),
         }
     except (SchemaOrgException, WebsiteNotImplementedError):
         return None
     except Exception as e:
         logger.debug("Scrape failed for %s: %s", url, e)
         return None
-
-# build event
-def get_rss_tags(entry) -> list[str]:
-    return [t.get("term", "") for t in entry.get("tags", []) if t.get("term")]
 
 def build_event(entry, feed_meta: dict, scraped: dict) -> dict:
     title = entry.get("title", "unknown").strip()
@@ -192,8 +196,6 @@ def build_event(entry, feed_meta: dict, scraped: dict) -> dict:
             "link":        normalize_link(link),                  # bare link, matches ETL
             "source":      feed_meta["source"],
             "published_at": published,
-            "tags":        get_rss_tags(entry),
-            "rating":      parse_rating(scraped.get("rating")),   # normalized to float
             "ingredients": normalize_ingredients(                  # fully normalized
                                scraped.get("ingredients", [])
                            ),
@@ -216,7 +218,7 @@ def poll_feed(feed_meta: dict):
     sent    = 0
     skipped = 0
 
-    for entry in feed.entries:  # parallelize in future maybe
+    for entry in feed.entries:
         title     = entry.get("title", "").strip()
         link      = entry.get("link", "")
         recipe_id = make_recipe_id(title, link)
@@ -261,11 +263,10 @@ def main():
     logger.info("Starting Leftover-to-Makeover RSS Ingestor")
     logger.info("Feeds: %d | Topic: %s | Poll interval: %ds",
                 len(RSS_FEEDS), TOPIC, POLL_INTERVAL_SECONDS)
-    poll_all()
     try:
         while True:
-            time.sleep(POLL_INTERVAL_SECONDS)
             poll_all()
+            time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         if producer:

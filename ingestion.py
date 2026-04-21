@@ -53,9 +53,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rss_ingestor")
 
+# ingredient parsing constants
 SERVING_PHRASES = frozenset({
     "for serving", "for garnish", "for topping", "for dipping",
     "for drizzling", "to serve"
+})
+
+TRAILING_PREP = re.compile(
+    r"\b(finely|roughly|coarsely|thinly|thickly|side|halved|sliced|"
+    r"chopped|diced|minced|grated|shredded|crushed|divided|optional|"
+    r"softened|melted|beaten|torn|peeled|deveined|butterflied)\b.*$",
+    re.IGNORECASE
+)
+
+LEADING_UNITS = re.compile(
+    r"^(cup|cups|tbsp|tsp|tablespoon|teaspoon|oz|lb|gram|kg|ml|liter|pinch|bunch|clove|cloves|"
+    r"slice|slices|can|cans|package|stick|handful|sprig|sheet|fillet|block)\s+",
+    re.IGNORECASE
+)
+
+QUANTITY_WORDS = re.compile(r"^(half|quarter|third|a|an|\d+)\s+", re.IGNORECASE)
+
+UNIT_WORDS = frozenset({
+    "cup", "cups", "tbsp", "tsp", "tablespoon", "teaspoon", "oz", "lb",
+    "gram", "kg", "ml", "liter", "pinch", "bunch", "clove", "cloves",
+    "slice", "slices", "can", "cans", "package", "stick", "handful",
+    "sprig", "sheet", "fillet", "block", "medium", "large", "small"
 })
 
 # in-memory de-duplication
@@ -102,10 +125,16 @@ def strip_brand_names(name: str) -> str:
     filtered = [words[0]] + [w for w in words[1:] if not w[0].isupper()]
     return " ".join(filtered) if filtered else name
 
+def strip_trailing_prep(name: str) -> str:
+    return TRAILING_PREP.sub("", name).strip()
+
+def strip_leading_units(name: str) -> str:
+    return LEADING_UNITS.sub("", name).strip()
+
 def is_serving_line(raw: str) -> bool:
     lower = raw.lower()
     return any(phrase in lower for phrase in SERVING_PHRASES)
-    
+
 def preprocess_ingredient(raw: str) -> str:
     # strip parentheticals
     raw = re.sub(r"\(.*?\)", "", raw).strip()
@@ -118,6 +147,11 @@ def preprocess_ingredient(raw: str) -> str:
     raw = re.sub(r"^a\s+(handful|pinch|splash|drizzle|dash|bit|few|couple)\s+of\s+",
                  "", raw, flags=re.IGNORECASE).strip()
 
+    # handle bare "X of Y" vague quantifiers
+    raw = re.sub(r"^(handful|pinch|splash|drizzle|dash|bit|few|couple)\s+of\s+",
+                 "", raw, flags=re.IGNORECASE).strip()
+
+    # handle "or" alternatives
     if " or " in raw.lower():
         raw = raw.split(" or ")[0].strip()
 
@@ -125,6 +159,8 @@ def preprocess_ingredient(raw: str) -> str:
     if " of " in raw.lower() and not re.search(r"cream of|out of|instead of", raw.lower()):
         parts = raw.split(" of ", 1)
         thing = re.sub(r"[\d¼½¾⅓⅔]+", "", parts[-1]).strip().rstrip("s")
+        while QUANTITY_WORDS.match(thing):
+            thing = QUANTITY_WORDS.sub("", thing).strip()
         descriptor = parts[0].strip()
         raw = f"{thing} {descriptor}".strip()
 
@@ -141,14 +177,21 @@ def normalize_ingredients(raw_list: list[str]) -> list[dict]:
         try:
             preprocessed = preprocess_ingredient(raw)
             parsed = nlp_parse(preprocessed)
-            name = canonicalize(strip_brand_names(parsed.get("name", "")))
-
+            name = canonicalize(strip_trailing_prep(strip_leading_units(strip_brand_names(parsed.get("name", "")))))
         except Exception as e:
             logger.debug("NLP parse failed for '%s': %s", raw, e)
 
-        # fallback to raw string
+        if len(name.split()) > 5:
+            name = canonicalize(strip_trailing_prep(name))
+
         if not name or len(name.split()) > 5:
-            name = raw.strip().lower()
+            words = [
+                w for w in preprocess_ingredient(raw).split()
+                if not w[0].isdigit()
+                and w.lower() not in {"a", "an", "the", "of", "and", "side", "skin", "on"}
+                and w.lower() not in UNIT_WORDS  # add this
+            ]
+            name = canonicalize(strip_trailing_prep(" ".join(words[:2]))) if words else raw.strip().lower()
 
         result.append({
             "ingredient_id": make_ingredient_id(name),

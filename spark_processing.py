@@ -85,7 +85,8 @@ spark = (
         ]),
     )
     .config("spark.sql.shuffle.partitions", "4")
-    # Required for JPMS modules used by Kafka + JDBC drivers under Java 17+
+    .config("spark.sql.streaming.metricsEnabled", "false")        # moved here
+    .config("spark.kafka.consumer.metrics.enabled", "false")      # add this
     .config(
         "spark.driver.extraJavaOptions",
         "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
@@ -98,14 +99,13 @@ spark = (
     )
     .getOrCreate()
 )
-spark.conf.set("spark.sql.streaming.metricsEnabled", "false")
+
 spark.sparkContext.setLogLevel("WARN")
 logger.info("Spark session started — version %s", spark.version)
 
 # schema
 INGREDIENT_SCHEMA = StructType([
     StructField("ingredient_id",  StringType(), True),
-    StructField("name",           StringType(), True),
     StructField("raw_text",       StringType(), True),
 ])
 
@@ -282,7 +282,6 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
             .select(
                 F.col("recipe_id"),
                 F.col("ing.ingredient_id"),
-                F.col("ing.name"),
                 F.col("ing.raw_text"),
             )
             .dropDuplicates(["recipe_id", "ingredient_id"])

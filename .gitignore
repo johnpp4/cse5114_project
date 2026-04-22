@@ -4,3 +4,15 @@
 /kafka_2.13-3.9.2
 /*.tgz
 /.env
+
+# Python bytecode/cache
+__pycache__/
+*.pyc
+
+# Local Snowflake key material
+/keys/
+/rsa_key.p8
+/rsa_key.pub
+/rsa_key_new.p8
+/rsa_key_new.pub
+/rsa_key_new.pem

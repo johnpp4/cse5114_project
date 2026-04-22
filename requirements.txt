@@ -6,7 +6,6 @@ pyspark
 snowflake-connector-python
 pandas
 python-dotenv
-spacy
 
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0

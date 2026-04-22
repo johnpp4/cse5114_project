@@ -2,9 +2,19 @@
   const form = document.getElementById("search-form");
   const ingredientsEl = document.getElementById("ingredients");
   const statusEl = document.getElementById("status");
+  const recentStatusEl = document.getElementById("recent-status");
   const parsedEl = document.getElementById("parsed");
   const resultsEl = document.getElementById("results");
   const submitBtn = document.getElementById("submit-btn");
+  const loadMoreBtn = document.getElementById("load-more-btn");
+  const INITIAL_PAGE_SIZE = 30;
+  const LOAD_MORE_STEP = 10;
+  const MAX_LIMIT = 100;
+  let currentLimit = INITIAL_PAGE_SIZE;
+  let currentIngredients = "";
+
+  // Keep hidden until we have a successful search response.
+  loadMoreBtn.classList.add("hidden");
 
   function esc(s) {
     const d = document.createElement("div");
@@ -34,7 +44,11 @@
       const li = document.createElement("li");
       li.className = "card";
       const pct = Math.round(rec.match_score * 100);
-      const link = rec.link || "#";
+      const link = rec.search_link || rec.link || "#";
+      const sourceLink =
+        rec.link && rec.search_link && rec.link !== rec.search_link
+          ? ' · <a href="' + esc(rec.link) + '" target="_blank" rel="noopener">Recipe</a>'
+          : "";
       li.innerHTML =
         '<div class="card-head">' +
         '<h3 class="card-title"><a href="' +
@@ -48,6 +62,7 @@
         '<p class="meta">' +
         esc([rec.cuisine, rec.meal_type].filter(Boolean).join(" · ")) +
         (rec.rating != null ? " · ★ " + rec.rating : "") +
+        sourceLink +
         "</p>" +
         '<ul class="chips" id="chips-' +
         esc(rec.recipe_id) +
@@ -70,15 +85,18 @@
     }
   }
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    statusEl.textContent = "";
+  async function fetchAndRender(limit) {
+    statusEl.textContent = "Loading recipes...";
     statusEl.classList.remove("error");
     submitBtn.disabled = true;
+    submitBtn.textContent = "Loading...";
+    loadMoreBtn.disabled = true;
+    loadMoreBtn.classList.add("hidden");
+    recentStatusEl.textContent = "";
 
     const body = {
-      ingredients: ingredientsEl.value,
-      limit: 30,
+      ingredients: currentIngredients,
+      limit,
       min_score: 0,
     };
 
@@ -100,25 +118,52 @@
       }
       statusEl.textContent = data.results.length + " recipe(s) ranked by ingredient overlap.";
       renderResults(data);
+      const hasMore = data.results.length >= limit && limit < MAX_LIMIT;
+      if (hasMore) {
+        loadMoreBtn.classList.remove("hidden");
+      } else {
+        loadMoreBtn.classList.add("hidden");
+      }
     } catch (err) {
       statusEl.textContent = String(err.message || err);
       statusEl.classList.add("error");
       resultsEl.innerHTML = "";
+      loadMoreBtn.classList.add("hidden");
     } finally {
       submitBtn.disabled = false;
+      submitBtn.textContent = "Find recipes";
+      loadMoreBtn.disabled = false;
     }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    currentIngredients = ingredientsEl.value;
+    currentLimit = INITIAL_PAGE_SIZE;
+    await fetchAndRender(currentLimit);
+  });
+
+  loadMoreBtn.addEventListener("click", async () => {
+    currentLimit = Math.min(currentLimit + LOAD_MORE_STEP, MAX_LIMIT);
+    await fetchAndRender(currentLimit);
   });
 
   // load recent recipes on page load
   async function loadRecentRecipes() {
+      recentStatusEl.textContent = "Loading recent recipe feed...";
       try {
           const r = await fetch("/api/recent-recipes");
           const data = await r.json();
           if (data.results && data.results.length) {
               renderRecentRecipes(data.results);
+              recentStatusEl.textContent = `Showing ${data.results.length} recent recipe(s).`;
+          } else {
+              recentStatusEl.textContent = "No recent recipes available.";
           }
       } catch (err) {
           console.error("Failed to load recent recipes:", err);
+          recentStatusEl.textContent = "Unable to load recent recipe feed.";
+          recentStatusEl.classList.add("error");
       }
   }
 

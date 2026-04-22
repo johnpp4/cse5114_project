@@ -56,8 +56,15 @@ def ingredient_matches_user(recipe_ing_name: str, user_phrases: list[str]) -> bo
             continue
         u_norm = _norm(u)
 
-        # exact match
+        # Avoid noisy one-letter artifacts from source data (e.g. "i").
+        if len(r) < 2 or len(u_norm) < 2:
+            continue
         if u_norm == r:
+            return True
+
+        # Substring matching is useful for "olive oil" vs "extra virgin olive oil",
+        # but too permissive for very short tokens.
+        if len(r) >= 3 and len(u_norm) >= 3 and (u_norm in r or r in u_norm):
             return True
 
         # word boundary match — prevents "water" matching "watermelon"
@@ -96,9 +103,19 @@ def score_recipe(recipe: dict[str, Any], user_phrases: list[str]) -> ScoredRecip
             missing.append(n)
     total = max(len(names), 1)
     overlap_ratio = len(matched) / total
+
+    # Also score how much of the user's requested list this recipe covers.
+    # This prevents many tiny recipes from clustering at 100% overlap.
+    covered_phrases = 0
+    for phrase in user_phrases:
+        if any(ingredient_matches_user(n, [phrase]) for n in names):
+            covered_phrases += 1
+    phrase_coverage = covered_phrases / max(len(user_phrases), 1)
+    combined_score = (0.6 * overlap_ratio) + (0.4 * phrase_coverage)
+
     return ScoredRecipe(
         recipe=recipe,
-        match_score=round(overlap_ratio, 4),
+        match_score=round(combined_score, 4),
         matched_ingredient_names=matched,
         missing_ingredient_names=missing,
     )

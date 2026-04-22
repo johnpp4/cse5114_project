@@ -7,10 +7,20 @@ Reads credentials from .env (or environment):
 """
 
 from __future__ import annotations
+
+import logging
+import os
+import time
 from pathlib import Path
 from typing import Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
-from confluent_kafka import Consumer
+try:
+    from confluent_kafka import Consumer
+except ImportError:
+    Consumer = None
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +32,6 @@ from .engine import parse_user_ingredients, recommend
 from .query_snowflake import fetch_candidates, validate_snowflake_env, fetch_recent
 
 from dotenv import load_dotenv
-import logging
 import asyncio
 import json
 
@@ -32,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+LINK_CHECK_TIMEOUT_S = float(os.environ.get("LINK_CHECK_TIMEOUT_S", "3"))
+LINK_CHECK_CACHE_TTL_S = int(os.environ.get("LINK_CHECK_CACHE_TTL_S", "3600"))
+_LINK_OK_CACHE: dict[str, tuple[float, bool]] = {}
 
 connected_clients: set = set()
 
@@ -44,16 +56,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# listen to kafka topic for updates in real time
-consumer = Consumer({
-    "bootstrap.servers": "localhost:9092",
-    "group.id": "recipe-ui",
-    "auto.offset.reset": "latest",
-})
-
-consumer.subscribe(["recipes_processed"])
+consumer = None
+if Consumer is not None:
+    # Listen to kafka topic for updates in real time.
+    consumer = Consumer({
+        "bootstrap.servers": "localhost:9092",
+        "group.id": "recipe-ui",
+        "auto.offset.reset": "latest",
+    })
+    consumer.subscribe(["recipes_processed"])
+else:
+    logger.warning("confluent_kafka not installed; realtime Kafka updates disabled.")
 
 def kafka_listener(loop: asyncio.AbstractEventLoop):
+    if consumer is None:
+        return
     while True:
         msg = consumer.poll(1.0)
         if msg is None or msg.error():
@@ -68,8 +85,9 @@ def kafka_listener(loop: asyncio.AbstractEventLoop):
 @app.on_event("startup")
 async def on_startup():
     validate_snowflake_env()
-    loop = asyncio.get_event_loop()  # get loop here in async context
-    asyncio.create_task(asyncio.to_thread(kafka_listener, loop))
+    if consumer is not None:
+        loop = asyncio.get_event_loop()  # get loop here in async context
+        asyncio.create_task(asyncio.to_thread(kafka_listener, loop))
 
 # ---------------------------------------------------------------------------
 # Models
@@ -81,13 +99,52 @@ class RecommendBody(BaseModel):
     min_score: float = Field(0.0, ge=0.0, le=1.0)
 
 
-def _scored_to_dict(s):
+def _is_url_reachable(url: str) -> bool:
+    now = time.time()
+    cached = _LINK_OK_CACHE.get(url)
+    if cached and (now - cached[0] <= LINK_CHECK_CACHE_TTL_S):
+        return cached[1]
+
+    ok = False
+    headers = {"User-Agent": "Mozilla/5.0 LeftoverToMakeover/1.0"}
+    try:
+        req = Request(url, method="HEAD", headers=headers)
+        with urlopen(req, timeout=LINK_CHECK_TIMEOUT_S) as resp:
+            ok = 200 <= getattr(resp, "status", 200) < 400
+    except HTTPError as exc:
+        # Some sites block HEAD; retry with GET when method is not allowed.
+        if exc.code == 405:
+            try:
+                req = Request(url, method="GET", headers=headers)
+                with urlopen(req, timeout=LINK_CHECK_TIMEOUT_S) as resp:
+                    ok = 200 <= getattr(resp, "status", 200) < 400
+            except (HTTPError, URLError, TimeoutError, ValueError):
+                ok = False
+        else:
+            ok = False
+    except (URLError, TimeoutError, ValueError):
+        ok = False
+
+    _LINK_OK_CACHE[url] = (now, ok)
+    return ok
+
+
+def _scored_to_dict_or_none(s):
     r = s.recipe
+    title = str(r.get("title") or "recipe")
+    search_link = f"https://www.google.com/search?q={quote_plus(title + ' recipe')}"
+    raw_link = str(r.get("link") or "").strip()
+    if raw_link and not raw_link.lower().startswith(("http://", "https://")):
+        raw_link = f"https://{raw_link}"
+    # Only include recipes that have a reachable source link.
+    if not raw_link or not _is_url_reachable(raw_link):
+        return None
     return {
         "recipe_id":            r.get("recipe_id"),
-        "title":                r.get("title"),
+        "title":                title,
         "rating":               r.get("rating"),
-        "link":                 r.get("link"),
+        "link":                 raw_link,
+        "search_link":          search_link,
         "match_score":          s.match_score,
         "matched_ingredients":  s.matched_ingredient_names,
         "missing_ingredients":  s.missing_ingredient_names,
@@ -124,8 +181,16 @@ def recommend_get(
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    scored = recommend(candidates, phrases, limit=limit, min_score=min_score)
-    return {"query_parsed": phrases, "results": [_scored_to_dict(s) for s in scored]}
+    # Pull a larger pool first because some recipes are dropped if source links are dead.
+    scored = recommend(candidates, phrases, limit=min(limit * 5, 200), min_score=min_score)
+    results = []
+    for s in scored:
+        item = _scored_to_dict_or_none(s)
+        if item is not None:
+            results.append(item)
+        if len(results) >= limit:
+            break
+    return {"query_parsed": phrases, "results": results}
 
 
 @app.post("/api/recommend")
@@ -138,8 +203,15 @@ def recommend_post(body: RecommendBody):
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    scored = recommend(candidates, phrases, limit=body.limit, min_score=body.min_score)
-    return {"query_parsed": phrases, "results": [_scored_to_dict(s) for s in scored]}
+    scored = recommend(candidates, phrases, limit=min(body.limit * 5, 200), min_score=body.min_score)
+    results = []
+    for s in scored:
+        item = _scored_to_dict_or_none(s)
+        if item is not None:
+            results.append(item)
+        if len(results) >= body.limit:
+            break
+    return {"query_parsed": phrases, "results": results}
 
 @app.websocket("/ws/new-recipes")
 async def websocket_endpoint(websocket: WebSocket):
@@ -176,149 +248,3 @@ def serve_ui():
 
 
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
-
-# """
-# Leftover to Makeover — recommendation REST API + static UI.
-# Run: uvicorn recommendation_api.main:app --reload --app-dir ..
-# Or from repo root: uvicorn recommendation_api.main:app --reload
-# """
-
-# from __future__ import annotations
-
-# import os
-# from pathlib import Path
-
-# from typing import Optional
-
-# from fastapi import FastAPI, HTTPException, Query
-# from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.responses import FileResponse
-# from fastapi.staticfiles import StaticFiles
-# from pydantic import BaseModel, Field
-
-# from .engine import load_recipes_json, parse_user_ingredients, recommend
-
-# ROOT = Path(__file__).resolve().parent
-# DATA_PATH = Path(os.environ.get("RECIPES_DATA_PATH", str(ROOT / "data" / "recipes_demo.json")))
-# STATIC_DIR = ROOT / "static"
-
-# _RECIPES_CACHE: Optional[list] = None
-
-
-# def get_recipes() -> list:
-#     global _RECIPES_CACHE
-#     if _RECIPES_CACHE is None:
-#         if not DATA_PATH.exists():
-#             raise FileNotFoundError(f"Recipe data not found: {DATA_PATH}")
-#         _RECIPES_CACHE = load_recipes_json(DATA_PATH)
-#     return _RECIPES_CACHE
-
-
-# app = FastAPI(title="Leftover to Makeover API", version="0.1.0")
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-
-# class RecommendBody(BaseModel):
-#     ingredients: str = Field(..., description="Comma-separated ingredients you have")
-#     cuisine: Optional[str] = None
-#     meal_type: Optional[str] = None
-#     limit: int = Field(25, ge=1, le=100)
-#     min_score: float = Field(0.0, ge=0.0, le=1.0)
-
-
-# def _scored_to_dict(s):
-#     r = s.recipe
-#     return {
-#         "recipe_id": r.get("recipe_id"),
-#         "title": r.get("title"),
-#         "cuisine": r.get("cuisine"),
-#         "meal_type": r.get("meal_type"),
-#         "rating": r.get("rating"),
-#         "link": r.get("link"),
-#         "match_score": s.match_score,
-#         "matched_ingredients": s.matched_ingredient_names,
-#         "missing_ingredients": s.missing_ingredient_names,
-#         "ingredient_count": len(r.get("ingredients") or []),
-#     }
-
-
-# @app.get("/api/health")
-# def health():
-#     return {"status": "ok", "data_path": str(DATA_PATH), "recipe_count": len(get_recipes())}
-
-
-# @app.get("/api/filters")
-# def filters():
-#     recipes = get_recipes()
-#     cuisines = sorted({str(r.get("cuisine") or "").strip() for r in recipes if r.get("cuisine")})
-#     meals = sorted({str(r.get("meal_type") or "").strip() for r in recipes if r.get("meal_type")})
-#     return {"cuisines": [c for c in cuisines if c], "meal_types": [m for m in meals if m]}
-
-
-# @app.get("/api/recommend")
-# def recommend_get(
-#     q: str = Query(..., description="Ingredients, comma-separated"),
-#     cuisine: Optional[str] = None,
-#     meal_type: Optional[str] = None,
-#     limit: int = Query(25, ge=1, le=100),
-#     min_score: float = Query(0.0, ge=0.0, le=1.0),
-# ):
-#     phrases = parse_user_ingredients(q)
-#     if not phrases:
-#         raise HTTPException(400, "Provide at least one ingredient in `q`")
-#     try:
-#         recipes = get_recipes()
-#     except FileNotFoundError as e:
-#         raise HTTPException(500, str(e)) from e
-#     scored = recommend(
-#         recipes,
-#         phrases,
-#         cuisine=cuisine or None,
-#         meal_type=meal_type or None,
-#         limit=limit,
-#         min_score=min_score,
-#     )
-#     return {
-#         "query_parsed": phrases,
-#         "results": [_scored_to_dict(s) for s in scored],
-#     }
-
-
-# @app.post("/api/recommend")
-# def recommend_post(body: RecommendBody):
-#     phrases = parse_user_ingredients(body.ingredients)
-#     if not phrases:
-#         raise HTTPException(400, "Provide at least one ingredient")
-#     try:
-#         recipes = get_recipes()
-#     except FileNotFoundError as e:
-#         raise HTTPException(500, str(e)) from e
-#     scored = recommend(
-#         recipes,
-#         phrases,
-#         cuisine=body.cuisine,
-#         meal_type=body.meal_type,
-#         limit=body.limit,
-#         min_score=body.min_score,
-#     )
-#     return {
-#         "query_parsed": phrases,
-#         "results": [_scored_to_dict(s) for s in scored],
-#     }
-
-
-# @app.get("/")
-# def serve_ui():
-#     index = STATIC_DIR / "index.html"
-#     if not index.exists():
-#         raise HTTPException(404, "UI not built — missing static/index.html")
-#     return FileResponse(index)
-
-
-# app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")

@@ -7,27 +7,33 @@ Reads credentials from .env (or environment):
 """
 
 from __future__ import annotations
-
-import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from confluent_kafka import Consumer
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from dotenv import load_dotenv
-load_dotenv()
-
 from .engine import parse_user_ingredients, recommend
-from .query_snowflake import fetch_candidates, validate_snowflake_env
+from .query_snowflake import fetch_candidates, validate_snowflake_env, fetch_recent
+
+from dotenv import load_dotenv
+import logging
+import asyncio
+import json
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+
+connected_clients: set = set()
 
 app = FastAPI(title="Leftover to Makeover API", version="0.1.0")
 app.add_middleware(
@@ -38,15 +44,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# listen to kafka topic for updates in real time
+consumer = Consumer({
+    "bootstrap.servers": "localhost:9092",
+    "group.id": "recipe-ui",
+    "auto.offset.reset": "latest",
+})
+
+consumer.subscribe(["recipes_processed"])
+
+def kafka_listener(loop: asyncio.AbstractEventLoop):
+    while True:
+        msg = consumer.poll(1.0)
+        if msg is None or msg.error():
+            continue
+        event = json.loads(msg.value().decode("utf-8"))
+        asyncio.run_coroutine_threadsafe(
+            broadcast_new_recipes([event]),
+            loop
+        )
+
 
 @app.on_event("startup")
-def _validate_env_on_startup():
-    try:
-        validate_snowflake_env()
-    except RuntimeError as exc:
-        logger.error("Snowflake configuration error: %s", exc)
-        raise
-
+async def on_startup():
+    validate_snowflake_env()
+    loop = asyncio.get_event_loop()  # get loop here in async context
+    asyncio.create_task(asyncio.to_thread(kafka_listener, loop))
 
 # ---------------------------------------------------------------------------
 # Models
@@ -75,6 +98,12 @@ def _scored_to_dict(s):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.get("/api/recent-recipes")
+def recent_recipes():
+    try:
+        return {"results": fetch_recent()}
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
 
 @app.get("/api/health")
 def health():
@@ -112,6 +141,31 @@ def recommend_post(body: RecommendBody):
     scored = recommend(candidates, phrases, limit=body.limit, min_score=body.min_score)
     return {"query_parsed": phrases, "results": [_scored_to_dict(s) for s in scored]}
 
+@app.websocket("/ws/new-recipes")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # blocks until client sends or disconnects
+    except Exception:
+        connected_clients.discard(websocket)
+
+# this is called evertime a new recipe is detected in snowflake
+async def broadcast_new_recipes(recipes: list[dict]):
+    if not recipes or not connected_clients:
+        return
+
+    msg = json.dumps({
+        "type": "new_recipes",
+        "recipes": recipes
+    })
+
+    for ws in connected_clients.copy():
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            connected_clients.discard(ws)
 
 @app.get("/")
 def serve_ui():

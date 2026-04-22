@@ -24,7 +24,7 @@ from ingredient_parser import parse_ingredient as nlp_parse
 # configuration
 KAFKA_BROKER = "localhost:9092"
 TOPIC = "recipes_raw"
-POLL_INTERVAL_SECONDS = 15 # polls feeds every 15 seconds
+POLL_INTERVAL_SECONDS = 10 # polls feeds every 10 seconds
 
 
 RSS_FEEDS = [

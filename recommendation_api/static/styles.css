@@ -282,3 +282,29 @@ select:focus {
   font-style: italic;
   padding: 1rem 0;
 }
+
+.new-recipe-banner {
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 0.65rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    margin-bottom: 1rem;
+    font-weight: 600;
+}
+
+.new-recipe-banner:hover {
+    filter: brightness(0.95);
+}
+
+.badge.source {
+    background: #e8f4fd;
+    color: #1a5276;
+}
+
+.results-subtitle {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 1rem;
+}

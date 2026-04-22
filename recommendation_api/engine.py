@@ -46,10 +46,6 @@ def _tokens(s: str) -> set[str]:
 
 
 def ingredient_matches_user(recipe_ing_name: str, user_phrases: list[str]) -> bool:
-    """
-    True if any user phrase matches the canonical recipe ingredient name.
-    Uses substring, word overlap, and light fuzzy match.
-    """
     r = _norm(recipe_ing_name)
     if not r:
         return False
@@ -58,14 +54,25 @@ def ingredient_matches_user(recipe_ing_name: str, user_phrases: list[str]) -> bo
     for u in user_phrases:
         if not u:
             continue
-        if u == r or u in r or r in u:
+        u_norm = _norm(u)
+
+        # exact match
+        if u_norm == r:
             return True
-        uw = _tokens(u)
-        if r_words & uw:
+
+        # word boundary match — prevents "water" matching "watermelon"
+        if re.search(rf'\b{re.escape(u_norm)}\b', r):
             return True
-        # fuzzy whole phrase
-        if SequenceMatcher(None, u, r).ratio() >= 0.82:
+
+        # all user tokens must appear in recipe ingredient
+        uw = _tokens(u_norm)
+        if uw and uw.issubset(r_words):
             return True
+
+        # fuzzy match
+        if SequenceMatcher(None, u_norm, r).ratio() >= 0.82:
+            return True
+
     return False
 
 

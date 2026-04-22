@@ -34,6 +34,13 @@ from cryptography.hazmat.backends import default_backend
 import snowflake.connector
 from snowflake.connector import DictCursor
 
+import time
+
+# for most recent recipes inserted into snowflake
+_recent_cache: list[dict] = []
+_recent_cache_time: float = 0
+_CACHE_TTL = 30  # seconds
+
 _REQUIRED_SNOWFLAKE_ENV = (
     "SNOWFLAKE_ACCOUNT",
     "SNOWFLAKE_USER",
@@ -97,7 +104,6 @@ def _load_private_key() -> bytes:
         encryption_algorithm=NoEncryption(),
     )
 
-
 def _get_connection() -> snowflake.connector.SnowflakeConnection:
     connect_kwargs = dict(
         account=os.environ["SNOWFLAKE_ACCOUNT"],
@@ -122,61 +128,23 @@ def fetch_candidates(
     cuisine: str | None = None,
     meal_type: str | None = None,
 ) -> list[dict]:
-    """
-    Query Snowflake for recipes that contain at least one ingredient matching
-    any of the user's phrases, then fetch all ingredients for those recipes so
-    engine.py can compute the full match score.
-
-    Returns a list of recipe dicts shaped identically to what load_recipes_json()
-    previously produced, so engine.py::recommend() requires no changes.
-    """
     conn = _get_connection()
     try:
         return _fetch_candidates(conn, user_phrases, cuisine, meal_type)
     finally:
         conn.close()
 
-
-def fetch_filters() -> dict:
-    """Return distinct cuisine and meal_type values for the filter dropdowns."""
-    conn = _get_connection()
-    try:
-        cur = conn.cursor(DictCursor)
-        cur.execute("""
-            SELECT
-                ARRAY_AGG(DISTINCT CUISINE)   AS cuisines,
-                ARRAY_AGG(DISTINCT MEAL_TYPE) AS meal_types
-            FROM RECIPES
-            WHERE CUISINE IS NOT NULL
-            AND MEAL_TYPE IS NOT NULL
-        """)
-        row = cur.fetchone()
-        return {
-            "cuisines":   sorted(row["CUISINES"]   or []),
-            "meal_types": sorted(row["MEAL_TYPES"] or []),
-        }
-    finally:
-        conn.close()
-
-
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
 
 def _build_ilike_clause(phrases: list[str]) -> tuple[str, list[str]]:
-    """
-    Build a parameterised OR chain of ILIKE conditions against INGREDIENT_ID.
-    Returns the SQL fragment and the corresponding parameter list.
-
-    e.g. phrases = ["garlic", "butter"]
-    =>  "ri.INGREDIENT_ID ILIKE %s OR ri.INGREDIENT_ID ILIKE %s"
-        ["%garlic%", "%butter%"]
-
-    INGREDIENT_ID values follow the pattern "ing_<name>" (e.g. "ing_garlic"),
-    so a substring ILIKE match is correct here.
-    """
     conditions = " OR ".join("ri.INGREDIENT_ID ILIKE %s" for _ in phrases)
-    params = [f"%{p}%" for p in phrases]
+    params = []
+    for p in phrases:
+        # replace spaces with underscores to match ingredient_id format
+        slug = p.strip().lower().replace(" ", "_")
+        params.append(f"%{slug}%")
     return conditions, params
 
 
@@ -187,70 +155,124 @@ def _fetch_candidates(
     meal_type: str | None,
 ) -> list[dict]:
     ilike_clause, params = _build_ilike_clause(user_phrases)
+    total_phrases = len(user_phrases)
 
-    # Optional cuisine / meal_type filters appended as parameterised clauses
-    cuisine_clause   = "AND LOWER(r.CUISINE)   = LOWER(%s)" if cuisine   else ""
-    meal_type_clause = "AND LOWER(r.MEAL_TYPE) = LOWER(%s)" if meal_type else ""
-    if cuisine:
-        params.append(cuisine)
-    if meal_type:
-        params.append(meal_type)
-
-    # --- Step 1: find recipe_ids that have at least one matching ingredient ---
-    # Narrows the candidate set in Snowflake before any data crosses the network.
-    candidate_sql = f"""
-        SELECT DISTINCT ri.RECIPE_ID
-        FROM   RECIPE_INGREDIENTS ri
-        JOIN   RECIPES r ON r.RECIPE_ID = ri.RECIPE_ID
-        WHERE  ({ilike_clause})
-        {cuisine_clause}
-        {meal_type_clause}
+    scored_sql = f"""
+        WITH matched AS (
+            SELECT
+                ri.RECIPE_ID,
+                COUNT(DISTINCT ri.INGREDIENT_ID) as match_count
+            FROM RECIPE_INGREDIENTS ri
+            WHERE ({ilike_clause})
+            GROUP BY ri.RECIPE_ID
+        ),
+        totals AS (
+            SELECT
+                RECIPE_ID,
+                COUNT(DISTINCT INGREDIENT_ID) as total_count
+            FROM RECIPE_INGREDIENTS
+            GROUP BY RECIPE_ID
+        )
+        SELECT
+            m.RECIPE_ID,
+            m.match_count,
+            t.total_count,
+            ROUND(
+                2.0 * (m.match_count / t.total_count) * (m.match_count / {total_phrases})
+                / ((m.match_count / t.total_count) + (m.match_count / {total_phrases})),
+                4
+            ) as f1_score
+        FROM matched m
+        JOIN totals t ON m.RECIPE_ID = t.RECIPE_ID
+        WHERE m.match_count >= LEAST(2, {total_phrases})
+        ORDER BY f1_score DESC, m.match_count DESC
+        LIMIT 50
     """
 
     cur = conn.cursor()
-    cur.execute(candidate_sql, params)
-    candidate_ids = [row[0] for row in cur.fetchall()]
+    cur.execute(scored_sql, params)
+    rows = cur.fetchall()
 
-    if not candidate_ids:
+    if not rows:
         return []
 
-    # --- Step 2: fetch full recipe metadata for candidates only ---
+    candidate_ids = [row[0] for row in rows]
     id_placeholders = ", ".join("%s" for _ in candidate_ids)
+
+    # fetch recipe metadata
     cur.execute(f"""
-        SELECT RECIPE_ID, TITLE, CUISINE, MEAL_TYPE, RATING, LINK
-        FROM   RECIPES
-        WHERE  RECIPE_ID IN ({id_placeholders})
+        SELECT RECIPE_ID, TITLE, LINK, SOURCE, PUBLISHED_AT
+        FROM RECIPES
+        WHERE RECIPE_ID IN ({id_placeholders})
     """, candidate_ids)
 
     recipes: dict[str, dict] = {
         row[0]: {
-            "recipe_id":   row[0],
-            "title":       row[1],
-            "cuisine":     row[2],
-            "meal_type":   row[3],
-            "rating":      float(row[4]) if row[4] is not None else None,
-            "link":        row[5],
-            "ingredients": [],
+            "recipe_id":    row[0],
+            "title":        row[1],
+            "link":         row[2],
+            "source":       row[3],
+            "published_at": row[4],
+            "ingredients":  [],
         }
         for row in cur.fetchall()
     }
 
-    # --- Step 3: fetch ALL ingredients for candidate recipes ---
-    # engine.py needs the full ingredient list to compute match score
-    # (matched vs missing), not just the ones that matched the search phrase.
+    # fetch all ingredients for these recipes
     cur.execute(f"""
-        SELECT RECIPE_ID, INGREDIENT_ID, QUANTITY_GRAMS, RAW_TEXT
-        FROM   RECIPE_INGREDIENTS
-        WHERE  RECIPE_ID IN ({id_placeholders})
+        SELECT RECIPE_ID, INGREDIENT_ID, RAW_TEXT
+        FROM RECIPE_INGREDIENTS
+        WHERE RECIPE_ID IN ({id_placeholders})
     """, candidate_ids)
 
-    for recipe_id, ingredient_id, quantity_grams, raw_text in cur:
-        recipes[recipe_id]["ingredients"].append({
-            "ingredient_id":  ingredient_id,
-            "name":           ingredient_id.replace("ing_", "").replace("_", " "),
-            "quantity_grams": float(quantity_grams) if quantity_grams is not None else None,
-            "raw_text":       raw_text,
-        })
+    for recipe_id, ingredient_id, raw_text in cur:
+        if recipe_id in recipes:
+            recipes[recipe_id]["ingredients"].append({
+                "ingredient_id": ingredient_id,
+                "name":          ingredient_id.replace("ing_", "").replace("_", " "),
+                "raw_text":      raw_text,
+            })
 
     cur.close()
     return list(recipes.values())
+
+
+def fetch_recent() -> list[dict]:
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT RECIPE_ID, TITLE, LINK, SOURCE, CREATED_AT
+            FROM RECIPES
+            ORDER BY CREATED_AT DESC
+            LIMIT 20
+        """)
+        recipes = {
+            row[0]: {
+                "recipe_id":  row[0],
+                "title":      row[1],
+                "link":       row[2],
+                "source":     row[3],
+                "created_at": str(row[4]) if row[4] else None,
+                "ingredients": [],
+            }
+            for row in cur.fetchall()
+        }
+
+        if recipes:
+            id_placeholders = ", ".join("%s" for _ in recipes)
+            cur.execute(f"""
+                SELECT RECIPE_ID, INGREDIENT_ID
+                FROM RECIPE_INGREDIENTS
+                WHERE RECIPE_ID IN ({id_placeholders})
+            """, list(recipes.keys()))
+
+            for recipe_id, ingredient_id in cur:
+                if recipe_id in recipes:
+                    recipes[recipe_id]["ingredients"].append(
+                        ingredient_id.replace("ing_", "").replace("_", " ")
+                    )
+
+        return list(recipes.values())
+    finally:
+        conn.close()

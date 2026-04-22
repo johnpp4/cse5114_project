@@ -289,6 +289,26 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
             .dropDuplicates(["recipe_id", "ingredient_id"])
         )
 
+        def send_to_kafka(df):
+            kafka_df = df.select(
+                F.to_json(F.struct(
+                    F.col("recipe_id"),
+                    F.col("title"),
+                    F.col("link"),
+                    F.col("source"),
+                    F.col("published_at"),
+                    F.col("ingested_at"),
+                )).alias("value")
+            )
+            kafka_df.write \
+                .format("kafka") \
+                .option("kafka.bootstrap.servers", KAFKA_BROKER) \
+                .option("topic", "recipes_processed") \
+                .save()
+
+        # send to processed kafka topic
+        send_to_kafka(batch_df)
+
         # write to snowflake
         upsert_to_snowflake(recipes_df, "RECIPES", ["recipe_id"])
         upsert_to_snowflake(recipe_ingredients_df, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])

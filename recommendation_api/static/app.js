@@ -109,4 +109,77 @@
     }
   });
 
+  // load recent recipes on page load
+  async function loadRecentRecipes() {
+      try {
+          const r = await fetch("/api/recent-recipes");
+          const data = await r.json();
+          if (data.results && data.results.length) {
+              renderRecentRecipes(data.results);
+          }
+      } catch (err) {
+          console.error("Failed to load recent recipes:", err);
+      }
+  }
+
+  function renderRecentRecipes(recipes) {
+    resultsEl.innerHTML = "";
+    parsedEl.classList.add("hidden");
+
+    for (const rec of recipes) {
+        const li = document.createElement("li");
+        li.className = "card";
+        const link = rec.link
+            ? (rec.link.startsWith("http") ? rec.link : "https://" + rec.link)
+            : "#";
+        li.innerHTML =
+            '<div class="card-head">' +
+            '<h3 class="card-title"><a href="' + esc(link) +
+            '" target="_blank" rel="noopener">' + esc(rec.title) + "</a></h3>" +
+            '<span class="badge source">' + esc(rec.source || "") + "</span></div>" +
+            '<ul class="chips"></ul>';
+        resultsEl.appendChild(li);
+
+        const chips = li.querySelector(".chips");
+        for (const name of rec.ingredients || []) {
+            const c = document.createElement("li");
+            c.className = "chip";  // no ok/miss class — neutral grey
+            c.textContent = name;
+            chips.appendChild(c);
+        }
+    }
+  }
+
+  loadRecentRecipes();
+
+  // WebSocket: listen for new recipes from Kafka
+  function connectWebSocket() {
+    const ws = new WebSocket(`ws://${location.host}/ws/new-recipes`);
+
+    ws.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === "new_recipes") {
+            const banner = document.createElement("div");
+            banner.className = "new-recipe-banner";
+            banner.textContent = `✨ ${data.recipes.length} new recipe(s) just added — refresh feed`;
+            banner.onclick = () => {
+                loadRecentRecipes();  // reload the recent feed
+                banner.remove();
+            };
+            document.querySelector(".results-wrap").prepend(banner);
+        }
+    };
+
+    ws.onerror = () => {
+      console.warn("WebSocket connection failed — live updates unavailable");
+    };
+
+    ws.onclose = () => {
+      // reconnect after 5 seconds
+      setTimeout(connectWebSocket, 5000);
+    };
+  }
+
+  connectWebSocket()
+
 })();

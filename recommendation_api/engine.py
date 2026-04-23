@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any
 
 
 def _norm(s: str) -> str:
@@ -121,34 +121,14 @@ def score_recipe(recipe: dict[str, Any], user_phrases: list[str]) -> ScoredRecip
     )
 
 
-def filter_by_cuisine_meal(
-    recipes: Iterable[dict[str, Any]],
-    cuisine: Optional[str],
-    meal_type: Optional[str],
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    c = _norm(cuisine) if cuisine else ""
-    m = _norm(meal_type) if meal_type else ""
-    for r in recipes:
-        if c and c not in _norm(str(r.get("cuisine") or "")):
-            continue
-        if m and m not in _norm(str(r.get("meal_type") or "")):
-            continue
-        out.append(r)
-    return out
-
-
 def recommend(
     recipes: list[dict[str, Any]],
     user_phrases: list[str],
     *,
-    cuisine: Optional[str] = None,
-    meal_type: Optional[str] = None,
     limit: int = 30,
     min_score: float = 0.0,
 ) -> list[ScoredRecipe]:
-    pool = filter_by_cuisine_meal(recipes, cuisine, meal_type)
-    scored = [score_recipe(r, user_phrases) for r in pool]
+    scored = [score_recipe(r, user_phrases) for r in recipes]
     scored = [s for s in scored if s.match_score >= min_score]
     scored.sort(
         key=lambda s: (-s.match_score, -(s.recipe.get("rating") or 0), s.recipe.get("title", "")),

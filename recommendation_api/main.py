@@ -96,6 +96,7 @@ async def on_startup():
 class RecommendBody(BaseModel):
     ingredients: str = Field(..., description="Comma-separated ingredients you have")
     limit: int = Field(10, ge=1, le=100)
+    offset: int = Field(0, ge=0)
     min_score: float = Field(0.0, ge=0.0, le=1.0)
 
 
@@ -144,12 +145,33 @@ def _scored_to_dict_or_none(s):
         "title":                title,
         "rating":               r.get("rating"),
         "link":                 raw_link,
+        "source":               r.get("source"),
         "search_link":          search_link,
         "match_score":          s.match_score,
         "matched_ingredients":  s.matched_ingredient_names,
         "missing_ingredients":  s.missing_ingredient_names,
         "ingredient_count":     len(r.get("ingredients") or []),
     }
+
+
+def _paginate_scored_results(scored: list, *, offset: int, limit: int) -> tuple[list[dict], bool]:
+    results: list[dict] = []
+    seen_valid = 0
+    has_more = False
+    for s in scored:
+        item = _scored_to_dict_or_none(s)
+        if item is None:
+            continue
+        if seen_valid < offset:
+            seen_valid += 1
+            continue
+        if len(results) < limit:
+            results.append(item)
+            seen_valid += 1
+            continue
+        has_more = True
+        break
+    return results, has_more
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +193,7 @@ def health():
 def recommend_get(
     q: str = Query(..., description="Ingredients, comma-separated"),
     limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     min_score: float = Query(0.0, ge=0.0, le=1.0),
 ):
     phrases = parse_user_ingredients(q)
@@ -182,15 +205,10 @@ def recommend_get(
         raise HTTPException(500, str(exc)) from exc
 
     # Pull a larger pool first because some recipes are dropped if source links are dead.
-    scored = recommend(candidates, phrases, limit=min(limit * 5, 200), min_score=min_score)
-    results = []
-    for s in scored:
-        item = _scored_to_dict_or_none(s)
-        if item is not None:
-            results.append(item)
-        if len(results) >= limit:
-            break
-    return {"query_parsed": phrases, "results": results}
+    scanned_limit = min(max(offset + (limit * 5), 50), 500)
+    scored = recommend(candidates, phrases, limit=scanned_limit, min_score=min_score)
+    results, has_more = _paginate_scored_results(scored, offset=offset, limit=limit)
+    return {"query_parsed": phrases, "results": results, "has_more": has_more}
 
 
 @app.post("/api/recommend")
@@ -203,15 +221,10 @@ def recommend_post(body: RecommendBody):
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    scored = recommend(candidates, phrases, limit=min(body.limit * 5, 200), min_score=body.min_score)
-    results = []
-    for s in scored:
-        item = _scored_to_dict_or_none(s)
-        if item is not None:
-            results.append(item)
-        if len(results) >= body.limit:
-            break
-    return {"query_parsed": phrases, "results": results}
+    scanned_limit = min(max(body.offset + (body.limit * 5), 50), 500)
+    scored = recommend(candidates, phrases, limit=scanned_limit, min_score=body.min_score)
+    results, has_more = _paginate_scored_results(scored, offset=body.offset, limit=body.limit)
+    return {"query_parsed": phrases, "results": results, "has_more": has_more}
 
 @app.websocket("/ws/new-recipes")
 async def websocket_endpoint(websocket: WebSocket):

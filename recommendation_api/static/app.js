@@ -10,7 +10,7 @@
   const INITIAL_PAGE_SIZE = 30;
   const LOAD_MORE_STEP = 10;
   const MAX_LIMIT = 100;
-  let currentLimit = INITIAL_PAGE_SIZE;
+  let loadedCount = 0;
   let currentIngredients = "";
 
   // Keep hidden until we have a successful search response.
@@ -22,8 +22,28 @@
     return d.innerHTML;
   }
 
-  function renderResults(data) {
-    resultsEl.innerHTML = "";
+  function sourceFromLink(link) {
+    try {
+      const url = new URL(link);
+      return url.hostname.replace(/^www\./, "");
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function normalizedSourceLabel(source, link) {
+    const raw = String(source || "").trim();
+    if (raw && raw.toLowerCase() !== "source") {
+      return raw;
+    }
+    const fromLink = sourceFromLink(link);
+    return fromLink || "Unknown";
+  }
+
+  function renderResults(data, { append = false } = {}) {
+    if (!append) {
+      resultsEl.innerHTML = "";
+    }
     if (data.query_parsed && data.query_parsed.length) {
       parsedEl.textContent = "Matched against: " + data.query_parsed.join(", ");
       parsedEl.classList.remove("hidden");
@@ -44,11 +64,7 @@
       const li = document.createElement("li");
       li.className = "card";
       const pct = Math.round(rec.match_score * 100);
-      const link = rec.search_link || rec.link || "#";
-      const sourceLink =
-        rec.link && rec.search_link && rec.link !== rec.search_link
-          ? ' · <a href="' + esc(rec.link) + '" target="_blank" rel="noopener">Recipe</a>'
-          : "";
+      const link = rec.link || rec.search_link || "#";
       li.innerHTML =
         '<div class="card-head">' +
         '<h3 class="card-title"><a href="' +
@@ -60,9 +76,7 @@
         pct +
         "% match</span></div>" +
         '<p class="meta">' +
-        esc([rec.cuisine, rec.meal_type].filter(Boolean).join(" · ")) +
-        (rec.rating != null ? " · ★ " + rec.rating : "") +
-        sourceLink +
+        (rec.rating != null ? "★ " + rec.rating : "") +
         "</p>" +
         '<ul class="chips" id="chips-' +
         esc(rec.recipe_id) +
@@ -85,19 +99,18 @@
     }
   }
 
-  async function fetchAndRender(limit) {
-    statusEl.textContent = "Loading recipes...";
-    // Add a loading button
+  async function fetchAndRender(limit, offset, { append = false } = {}) {
+    statusEl.textContent = append ? "Loading more recipes..." : "Loading recipes...";
     statusEl.classList.remove("error");
     submitBtn.disabled = true;
     submitBtn.textContent = "Loading...";
     loadMoreBtn.disabled = true;
     loadMoreBtn.classList.add("hidden");
-    recentStatusEl.textContent = "";
 
     const body = {
       ingredients: currentIngredients,
       limit,
+      offset,
       min_score: 0,
     };
 
@@ -117,9 +130,13 @@
         }
         throw new Error(msg);
       }
-      statusEl.textContent = data.results.length + " recipe(s) ranked by ingredient overlap.";
-      renderResults(data);
-      const hasMore = data.results.length >= limit && limit < MAX_LIMIT;
+      renderResults(data, { append });
+      loadedCount = offset + (data.results || []).length;
+      statusEl.textContent = loadedCount + " recipe(s) ranked by ingredient overlap.";
+      if (offset === 0) {
+        recentStatusEl.textContent = "Showing top 20 recipes.";
+      }
+      const hasMore = Boolean(data.has_more) && loadedCount < MAX_LIMIT;
       if (hasMore) {
         loadMoreBtn.classList.remove("hidden");
       } else {
@@ -140,37 +157,45 @@
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     currentIngredients = ingredientsEl.value;
-    currentLimit = INITIAL_PAGE_SIZE;
-    await fetchAndRender(currentLimit);
+    loadedCount = 0;
+    await fetchAndRender(INITIAL_PAGE_SIZE, 0, { append: false });
   });
 
   loadMoreBtn.addEventListener("click", async () => {
-    currentLimit = Math.min(currentLimit + LOAD_MORE_STEP, MAX_LIMIT);
-    await fetchAndRender(currentLimit);
+    const remaining = Math.max(MAX_LIMIT - loadedCount, 0);
+    const pageSize = Math.min(LOAD_MORE_STEP, remaining);
+    if (pageSize <= 0) {
+      loadMoreBtn.classList.add("hidden");
+      return;
+    }
+    await fetchAndRender(pageSize, loadedCount, { append: true });
   });
 
-  // load recent recipes on page load
   async function loadRecentRecipes() {
-      recentStatusEl.textContent = "Loading recent recipe feed...";
-      try {
-          const r = await fetch("/api/recent-recipes");
-          const data = await r.json();
-          if (data.results && data.results.length) {
-              renderRecentRecipes(data.results);
-              recentStatusEl.textContent = `Showing ${data.results.length} recent recipe(s).`;
-          } else {
-              recentStatusEl.textContent = "No recent recipes available.";
-          }
-      } catch (err) {
-          console.error("Failed to load recent recipes:", err);
-          recentStatusEl.textContent = "Unable to load recent recipe feed.";
-          recentStatusEl.classList.add("error");
+    recentStatusEl.classList.remove("error");
+    recentStatusEl.textContent = "Loading recent recipe feed...";
+    loadMoreBtn.classList.add("hidden");
+    try {
+      const r = await fetch("/api/recent-recipes");
+      const data = await r.json();
+      const recipes = data.results || [];
+      renderRecentRecipes(recipes);
+      if (recipes.length) {
+        recentStatusEl.textContent = `Showing top ${recipes.length} recently uploaded recipe(s).`;
+      } else {
+        recentStatusEl.textContent = "No recent recipes available in Snowflake.";
       }
+    } catch (err) {
+      console.error("Failed to load recent recipes:", err);
+      recentStatusEl.textContent = "Unable to load recent recipe feed.";
+      recentStatusEl.classList.add("error");
+    }
   }
 
   function renderRecentRecipes(recipes) {
     resultsEl.innerHTML = "";
     parsedEl.classList.add("hidden");
+    loadMoreBtn.classList.add("hidden");
 
     for (const rec of recipes) {
         const li = document.createElement("li");
@@ -178,11 +203,12 @@
         const link = rec.link
             ? (rec.link.startsWith("http") ? rec.link : "https://" + rec.link)
             : "#";
+        const sourceLabel = normalizedSourceLabel(rec.source, link);
         li.innerHTML =
             '<div class="card-head">' +
             '<h3 class="card-title"><a href="' + esc(link) +
             '" target="_blank" rel="noopener">' + esc(rec.title) + "</a></h3>" +
-            '<span class="badge source">' + esc(rec.source || "") + "</span></div>" +
+            '<span class="badge source">' + esc(sourceLabel) + "</span></div>" +
             '<ul class="chips"></ul>';
         resultsEl.appendChild(li);
 
@@ -232,7 +258,7 @@
         liveBanner.style.display = "none";
       } else {
         liveBanner.style.display = "";
-        liveBanner.textContent = `${n} new recipe${n !== 1 ? "s" : ""} just added — refresh feed`;
+        liveBanner.textContent = `${n} new recipe${n !== 1 ? "s" : ""} just added`;
       }
     }
     // Tick every second so the count decays even without new messages

@@ -267,43 +267,27 @@ def fetch_recent() -> list[dict]:
     try:
         cur = conn.cursor()
         recipe_cols = _get_table_columns(conn, "RECIPES")
-
-        def choose_column(available: set[str], candidates: tuple[str, ...]) -> str | None:
-            for name in candidates:
-                if name in available:
-                    return name
-            return None
-
-        title_col = choose_column(recipe_cols, ("TITLE", "RECIPE_NAME", "NAME"))
-        link_col = choose_column(recipe_cols, ("LINK", "URL", "SOURCE_URL", "RECIPE_URL", "HREF"))
-        source_col = choose_column(recipe_cols, ("SOURCE", "FOOD_JOURNAL", "PUBLISHER", "SITE_NAME"))
-        published_col = choose_column(recipe_cols, ("PUBLISHED_AT", "PUBLISH_DATE", "PUBLISHED_DATE", "CREATED_AT"))
-
-        title_expr = f'"{title_col}"' if title_col else "TO_VARCHAR(RECIPE_ID)"
-        link_expr = f'"{link_col}"' if link_col else "NULL"
-        source_expr = f'"{source_col}"' if source_col else "NULL"
-        published_expr = f'"{published_col}"' if published_col else "NULL"
-        order_by_expr = f'"{published_col}" DESC' if published_col else "RECIPE_ID DESC"
+        required_cols = {"TITLE", "LINK", "SOURCE", "CREATED_AT"}
+        missing = sorted(required_cols - recipe_cols)
+        if missing:
+            raise RuntimeError(
+                "RECIPES table missing required columns for recent feed: "
+                + ", ".join(missing)
+            )
 
         cur.execute("""
-            SELECT RECIPE_ID, {title} AS TITLE, {link} AS LINK, {source} AS SOURCE, {published} AS PUBLISHED_AT
+            SELECT RECIPE_ID, TITLE, LINK, SOURCE, CREATED_AT
             FROM RECIPES
-            ORDER BY {order_by}
+            ORDER BY CREATED_AT DESC
             LIMIT 20
-        """.format(
-            title=title_expr,
-            link=link_expr,
-            source=source_expr,
-            published=published_expr,
-            order_by=order_by_expr,
-        ))
+        """)
         recipes = {
             row[0]: {
                 "recipe_id":  row[0],
                 "title":      row[1],
                 "link":       row[2],
                 "source":     row[3],
-                "published_at": str(row[4]) if row[4] else None,
+                "created_at": str(row[4]) if row[4] else None,
                 "ingredients": [],
             }
             for row in cur.fetchall()

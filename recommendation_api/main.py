@@ -46,6 +46,7 @@ LINK_CHECK_CACHE_TTL_S = int(os.environ.get("LINK_CHECK_CACHE_TTL_S", "3600"))
 _LINK_OK_CACHE: dict[str, tuple[float, bool]] = {}
 
 connected_clients: set = set()
+ENABLE_KAFKA = os.environ.get("ENABLE_KAFKA", "false").lower() == "true"
 
 app = FastAPI(title="Leftover to Makeover API", version="0.1.0")
 app.add_middleware(
@@ -57,7 +58,7 @@ app.add_middleware(
 )
 
 consumer = None
-if Consumer is not None:
+if ENABLE_KAFKA and Consumer is not None:
     # Listen to kafka topic for updates in real time.
     consumer = Consumer({
         "bootstrap.servers": "localhost:9092",
@@ -66,7 +67,7 @@ if Consumer is not None:
     })
     consumer.subscribe(["recipes_processed"])
 else:
-    logger.warning("confluent_kafka not installed; realtime Kafka updates disabled.")
+    logger.info("Realtime Kafka updates disabled.")
 
 def kafka_listener(loop: asyncio.AbstractEventLoop):
     if consumer is None:

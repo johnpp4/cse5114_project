@@ -102,20 +102,8 @@ def score_recipe(recipe: dict[str, Any], user_phrases: list[str]) -> ScoredRecip
         else:
             missing.append(n)
     total = max(len(names), 1)
-    overlap_ratio = len(matched) / total
 
-    # Also score how much of the user's requested list this recipe covers.
-    # This prevents many tiny recipes from clustering at 100% overlap.
-    covered_phrases = 0
-    for phrase in user_phrases:
-        if any(ingredient_matches_user(n, [phrase]) for n in names):
-            covered_phrases += 1
-    phrase_coverage = covered_phrases / max(len(user_phrases), 1)
-
-    # Use a stricter combination: both recipe overlap AND user-phrase coverage
-    # must be high to get a high final score. This better reflects many "need:"
-    # chips in the UI.
-    combined_score = overlap_ratio * phrase_coverage
+    combined_score = len(matched) / total
 
     return ScoredRecipe(
         recipe=recipe,

@@ -44,6 +44,10 @@ STATIC_DIR = ROOT / "static"
 LINK_CHECK_TIMEOUT_S = float(os.environ.get("LINK_CHECK_TIMEOUT_S", "3"))
 LINK_CHECK_CACHE_TTL_S = int(os.environ.get("LINK_CHECK_CACHE_TTL_S", "3600"))
 _LINK_OK_CACHE: dict[str, tuple[float, bool]] = {}
+ENABLE_LIVE_LINK_CHECK = os.environ.get("ENABLE_LIVE_LINK_CHECK", "false").lower() == "true"
+QUERY_CACHE_TTL_S = int(os.environ.get("QUERY_CACHE_TTL_S", "120"))
+QUERY_CACHE_MAX_RESULTS = int(os.environ.get("QUERY_CACHE_MAX_RESULTS", "500"))
+_QUERY_RESULTS_CACHE: dict[tuple[tuple[str, ...], float], tuple[float, list[dict]]] = {}
 
 connected_clients: set = set()
 ENABLE_KAFKA = os.environ.get("ENABLE_KAFKA", "false").lower() == "true"
@@ -138,8 +142,10 @@ def _scored_to_dict_or_none(s):
     raw_link = str(r.get("link") or "").strip()
     if raw_link and not raw_link.lower().startswith(("http://", "https://")):
         raw_link = f"https://{raw_link}"
-    # Only include recipes that have a reachable source link.
-    if not raw_link or not _is_url_reachable(raw_link):
+    # By default, skip live URL probing for performance; it can be enabled via env.
+    if not raw_link:
+        return None
+    if ENABLE_LIVE_LINK_CHECK and not _is_url_reachable(raw_link):
         return None
     return {
         "recipe_id":            r.get("recipe_id"),
@@ -175,6 +181,27 @@ def _paginate_scored_results(scored: list, *, offset: int, limit: int) -> tuple[
     return results, has_more
 
 
+def _cache_key(phrases: list[str], min_score: float) -> tuple[tuple[str, ...], float]:
+    return (tuple(phrases), round(float(min_score), 4))
+
+
+def _get_cached_results(phrases: list[str], min_score: float) -> list[dict] | None:
+    key = _cache_key(phrases, min_score)
+    cached = _QUERY_RESULTS_CACHE.get(key)
+    if not cached:
+        return None
+    ts, results = cached
+    if time.time() - ts > QUERY_CACHE_TTL_S:
+        _QUERY_RESULTS_CACHE.pop(key, None)
+        return None
+    return results
+
+
+def _set_cached_results(phrases: list[str], min_score: float, results: list[dict]) -> None:
+    key = _cache_key(phrases, min_score)
+    _QUERY_RESULTS_CACHE[key] = (time.time(), results[:QUERY_CACHE_MAX_RESULTS])
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -200,16 +227,26 @@ def recommend_get(
     phrases = parse_user_ingredients(q)
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient in `q`")
+
+    cached = _get_cached_results(phrases, min_score)
+    if cached is not None:
+        page = cached[offset: offset + limit]
+        has_more = (offset + len(page)) < len(cached)
+        return {"query_parsed": phrases, "results": page, "has_more": has_more}
+
     try:
         candidates = fetch_candidates(phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    # Pull a larger pool first because some recipes are dropped if source links are dead.
-    scanned_limit = min(max(offset + (limit * 5), 50), 500)
+    # Build and cache a reusable result pool for fast paging.
+    scanned_limit = QUERY_CACHE_MAX_RESULTS
     scored = recommend(candidates, phrases, limit=scanned_limit, min_score=min_score)
-    results, has_more = _paginate_scored_results(scored, offset=offset, limit=limit)
-    return {"query_parsed": phrases, "results": results, "has_more": has_more}
+    all_results, _ = _paginate_scored_results(scored, offset=0, limit=QUERY_CACHE_MAX_RESULTS)
+    _set_cached_results(phrases, min_score, all_results)
+    page = all_results[offset: offset + limit]
+    has_more = (offset + len(page)) < len(all_results)
+    return {"query_parsed": phrases, "results": page, "has_more": has_more}
 
 
 @app.post("/api/recommend")
@@ -217,15 +254,24 @@ def recommend_post(body: RecommendBody):
     phrases = parse_user_ingredients(body.ingredients)
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient")
+
+    cached = _get_cached_results(phrases, body.min_score)
+    if cached is not None:
+        page = cached[body.offset: body.offset + body.limit]
+        has_more = (body.offset + len(page)) < len(cached)
+        return {"query_parsed": phrases, "results": page, "has_more": has_more}
+
     try:
         candidates = fetch_candidates(phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    scanned_limit = min(max(body.offset + (body.limit * 5), 50), 500)
-    scored = recommend(candidates, phrases, limit=scanned_limit, min_score=body.min_score)
-    results, has_more = _paginate_scored_results(scored, offset=body.offset, limit=body.limit)
-    return {"query_parsed": phrases, "results": results, "has_more": has_more}
+    scored = recommend(candidates, phrases, limit=QUERY_CACHE_MAX_RESULTS, min_score=body.min_score)
+    all_results, _ = _paginate_scored_results(scored, offset=0, limit=QUERY_CACHE_MAX_RESULTS)
+    _set_cached_results(phrases, body.min_score, all_results)
+    page = all_results[body.offset: body.offset + body.limit]
+    has_more = (body.offset + len(page)) < len(all_results)
+    return {"query_parsed": phrases, "results": page, "has_more": has_more}
 
 @app.websocket("/ws/new-recipes")
 async def websocket_endpoint(websocket: WebSocket):

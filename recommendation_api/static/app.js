@@ -14,7 +14,12 @@
   let currentIngredients = "";
 
   // Keep hidden until we have a successful search response.
-  loadMoreBtn.classList.add("hidden");
+  function setLoadMoreVisible(visible) {
+    loadMoreBtn.classList.toggle("hidden", !visible);
+    loadMoreBtn.style.display = visible ? "" : "none";
+  }
+
+  setLoadMoreVisible(false);
 
   function esc(s) {
     const d = document.createElement("div");
@@ -105,7 +110,11 @@
     submitBtn.disabled = true;
     submitBtn.textContent = "Loading...";
     loadMoreBtn.disabled = true;
-    loadMoreBtn.classList.add("hidden");
+    setLoadMoreVisible(false);
+    if (!append) {
+      recentStatusEl.textContent = "";
+      recentStatusEl.classList.remove("error");
+    }
 
     const body = {
       ingredients: currentIngredients,
@@ -131,22 +140,16 @@
         throw new Error(msg);
       }
       renderResults(data, { append });
-      loadedCount = offset + (data.results || []).length;
+      const resultCount = (data.results || []).length;
+      loadedCount = offset + resultCount;
       statusEl.textContent = loadedCount + " recipe(s) ranked by ingredient overlap.";
-      if (offset === 0) {
-        recentStatusEl.textContent = "Showing top 20 recipes.";
-      }
-      const hasMore = Boolean(data.has_more) && loadedCount < MAX_LIMIT;
-      if (hasMore) {
-        loadMoreBtn.classList.remove("hidden");
-      } else {
-        loadMoreBtn.classList.add("hidden");
-      }
+      const hasMore = resultCount > 0 && Boolean(data.has_more) && loadedCount < MAX_LIMIT;
+      setLoadMoreVisible(hasMore);
     } catch (err) {
       statusEl.textContent = String(err.message || err);
       statusEl.classList.add("error");
       resultsEl.innerHTML = "";
-      loadMoreBtn.classList.add("hidden");
+      setLoadMoreVisible(false);
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = "Find recipes";
@@ -165,7 +168,7 @@
     const remaining = Math.max(MAX_LIMIT - loadedCount, 0);
     const pageSize = Math.min(LOAD_MORE_STEP, remaining);
     if (pageSize <= 0) {
-      loadMoreBtn.classList.add("hidden");
+      setLoadMoreVisible(false);
       return;
     }
     await fetchAndRender(pageSize, loadedCount, { append: true });
@@ -174,7 +177,7 @@
   async function loadRecentRecipes() {
     recentStatusEl.classList.remove("error");
     recentStatusEl.textContent = "Loading recent recipe feed...";
-    loadMoreBtn.classList.add("hidden");
+    setLoadMoreVisible(false);
     try {
       const r = await fetch("/api/recent-recipes");
       const data = await r.json();
@@ -195,7 +198,7 @@
   function renderRecentRecipes(recipes) {
     resultsEl.innerHTML = "";
     parsedEl.classList.add("hidden");
-    loadMoreBtn.classList.add("hidden");
+    setLoadMoreVisible(false);
 
     for (const rec of recipes) {
         const li = document.createElement("li");

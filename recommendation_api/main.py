@@ -202,6 +202,11 @@ def _set_cached_results(phrases: list[str], min_score: float, results: list[dict
     _QUERY_RESULTS_CACHE[key] = (time.time(), results[:QUERY_CACHE_MAX_RESULTS])
 
 
+def _filter_search_phrases(phrases: list[str]) -> list[str]:
+    # Ignore very short/noisy terms to avoid broad accidental matches.
+    return [p for p in phrases if len((p or "").strip()) >= 3]
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -227,23 +232,26 @@ def recommend_get(
     phrases = parse_user_ingredients(q)
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient in `q`")
+    search_phrases = _filter_search_phrases(phrases)
+    if not search_phrases:
+        return {"query_parsed": phrases, "results": [], "has_more": False}
 
-    cached = _get_cached_results(phrases, min_score)
+    cached = _get_cached_results(search_phrases, min_score)
     if cached is not None:
         page = cached[offset: offset + limit]
         has_more = (offset + len(page)) < len(cached)
         return {"query_parsed": phrases, "results": page, "has_more": has_more}
 
     try:
-        candidates = fetch_candidates(phrases)
+        candidates = fetch_candidates(search_phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
     # Build and cache a reusable result pool for fast paging.
     scanned_limit = QUERY_CACHE_MAX_RESULTS
-    scored = recommend(candidates, phrases, limit=scanned_limit, min_score=min_score)
+    scored = recommend(candidates, search_phrases, limit=scanned_limit, min_score=min_score)
     all_results, _ = _paginate_scored_results(scored, offset=0, limit=QUERY_CACHE_MAX_RESULTS)
-    _set_cached_results(phrases, min_score, all_results)
+    _set_cached_results(search_phrases, min_score, all_results)
     page = all_results[offset: offset + limit]
     has_more = (offset + len(page)) < len(all_results)
     return {"query_parsed": phrases, "results": page, "has_more": has_more}
@@ -254,21 +262,24 @@ def recommend_post(body: RecommendBody):
     phrases = parse_user_ingredients(body.ingredients)
     if not phrases:
         raise HTTPException(400, "Provide at least one ingredient")
+    search_phrases = _filter_search_phrases(phrases)
+    if not search_phrases:
+        return {"query_parsed": phrases, "results": [], "has_more": False}
 
-    cached = _get_cached_results(phrases, body.min_score)
+    cached = _get_cached_results(search_phrases, body.min_score)
     if cached is not None:
         page = cached[body.offset: body.offset + body.limit]
         has_more = (body.offset + len(page)) < len(cached)
         return {"query_parsed": phrases, "results": page, "has_more": has_more}
 
     try:
-        candidates = fetch_candidates(phrases)
+        candidates = fetch_candidates(search_phrases)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
-    scored = recommend(candidates, phrases, limit=QUERY_CACHE_MAX_RESULTS, min_score=body.min_score)
+    scored = recommend(candidates, search_phrases, limit=QUERY_CACHE_MAX_RESULTS, min_score=body.min_score)
     all_results, _ = _paginate_scored_results(scored, offset=0, limit=QUERY_CACHE_MAX_RESULTS)
-    _set_cached_results(phrases, body.min_score, all_results)
+    _set_cached_results(search_phrases, body.min_score, all_results)
     page = all_results[body.offset: body.offset + body.limit]
     has_more = (body.offset + len(page)) < len(all_results)
     return {"query_parsed": phrases, "results": page, "has_more": has_more}

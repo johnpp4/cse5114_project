@@ -1,11 +1,12 @@
 """
-Ingredient overlap scoring and filters for recipe recommendations.
+Ingredient overlap scoring and filters for recipe recommendations
 """
 
 from __future__ import annotations
 
 import json
 import re
+import math
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -17,13 +18,6 @@ def _norm(s: str) -> str:
 
 
 def parse_user_ingredients(text: str) -> list[str]:
-    """
-    Prefer **one ingredient per line** (clearest for users; avoids commas inside
-    quantities like "1/2 cup milk, room temperature" being split wrong).
-
-    If the user types only **one line**, commas/semicolons still split multiple
-    ingredients so paragraph-style paste still works.
-    """
     if not (text or "").strip():
         return []
 
@@ -103,7 +97,19 @@ def score_recipe(recipe: dict[str, Any], user_phrases: list[str]) -> ScoredRecip
             missing.append(n)
     total = max(len(names), 1)
 
-    combined_score = len(matched) / total
+    match_ratio = len(matched) / total
+    missing_count = len(missing)
+
+    # if not that many missing, give a bonus score
+    if missing_count <= 2:
+        bonus = 0.1
+    else:
+        bonus = 0
+
+    # penalize recipes with more missing ingredients
+    penalty = 0.06 * math.log1p(missing_count)
+    combined_score = match_ratio - penalty + bonus
+    combined_score = min(max(combined_score, 0), 1.0)
 
     return ScoredRecipe(
         recipe=recipe,
@@ -118,7 +124,7 @@ def recommend(
     user_phrases: list[str],
     *,
     limit: int = 30,
-    min_score: float = 0.0,
+    min_score: float = 0.3,
 ) -> list[ScoredRecipe]:
     scored = [score_recipe(r, user_phrases) for r in recipes]
     scored = [s for s in scored if s.match_score >= min_score]

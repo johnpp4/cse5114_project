@@ -230,27 +230,13 @@
   // WebSocket: listen for new recipes from Kafka
   function connectWebSocket() {
     const ws = new WebSocket(`ws://${location.host}/ws/new-recipes`);
-
-    // ws.onmessage = (e) => {
-    //     const data = JSON.parse(e.data);
-    //     if (data.type === "new_recipes") {
-    //         const banner = document.createElement("div");
-    //         banner.className = "new-recipe-banner";
-    //         banner.textContent = `${data.recipes.length} new recipe(s) just added — refresh feed`;
-    //         banner.onclick = () => {
-    //             loadRecentRecipes();  // reload the recent feed
-    //             banner.remove();
-    //         };
-    //         document.querySelector(".results-wrap").prepend(banner);
-    //     }
-    // };
-
     const liveBanner = document.createElement("div");
     liveBanner.className = "new-recipe-banner";
     liveBanner.style.display = "none";
     document.querySelector(".results-wrap").prepend(liveBanner);
 
     const recentTimestamps = []; // epoch-ms for each recipe received
+
     function updateLiveBanner() {
       const cutoff = Date.now() - 10_000;
       while (recentTimestamps.length && recentTimestamps[0] < cutoff) {
@@ -259,9 +245,16 @@
       const n = recentTimestamps.length;
       if (n === 0) {
         liveBanner.style.display = "none";
+        liveBanner.onclick = null;
       } else {
-        liveBanner.style.display = "";
-        liveBanner.textContent = `${n} new recipe${n !== 1 ? "s" : ""} just added`;
+        liveBanner.style.display = ""; 
+        liveBanner.textContent = `New recipe${n !== 1 ? "s" : ""} just added — click to load`;
+        liveBanner.onclick = () => {
+          recentTimestamps.length = 0;
+          liveBanner.style.display = "none";
+          liveBanner.onclick = null;
+          loadRecentRecipes();
+        }
       }
     }
     // Tick every second so the count decays even without new messages

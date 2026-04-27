@@ -1,5 +1,5 @@
 """
-Leftover to Makeover — recommendation REST API + static UI.
+recommendation REST API + static UI.
 
 Reads credentials from .env (or environment):
     SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_DATABASE,
@@ -50,7 +50,7 @@ QUERY_CACHE_MAX_RESULTS = int(os.environ.get("QUERY_CACHE_MAX_RESULTS", "500"))
 _QUERY_RESULTS_CACHE: dict[tuple[tuple[str, ...], float], tuple[float, list[dict]]] = {}
 
 connected_clients: set = set()
-ENABLE_KAFKA = os.environ.get("ENABLE_KAFKA", "false").lower() == "true"
+ENABLE_KAFKA = os.environ.get("ENABLE_KAFKA", "false").lower() == "true" # important, don't forget to set this in .env
 
 app = FastAPI(title="Leftover to Makeover API", version="0.1.0")
 app.add_middleware(
@@ -63,10 +63,10 @@ app.add_middleware(
 
 consumer = None
 if ENABLE_KAFKA and Consumer is not None:
-    # Listen to kafka topic for updates in real time.
+    # listen to kafka topic for updates in real time.
     consumer = Consumer({
         "bootstrap.servers": "localhost:9092",
-        "group.id": "recipe-ui",
+        "group.id": "recipe-ui-debug",
         "auto.offset.reset": "latest",
     })
     consumer.subscribe(["recipes_processed"])
@@ -76,10 +76,15 @@ else:
 def kafka_listener(loop: asyncio.AbstractEventLoop):
     if consumer is None:
         return
+    logger.info("Kafka listener thread started")
     while True:
         msg = consumer.poll(1.0)
-        if msg is None or msg.error():
+        if msg is None:
             continue
+        if msg.error():
+            logger.error("Kafka error: %s", msg.error())
+            continue
+        logger.info("Kafka message received: %s", msg.value().decode("utf-8"))
         event = json.loads(msg.value().decode("utf-8"))
         asyncio.run_coroutine_threadsafe(
             broadcast_new_recipes([event]),
@@ -91,12 +96,14 @@ def kafka_listener(loop: asyncio.AbstractEventLoop):
 async def on_startup():
     validate_snowflake_env()
     if consumer is not None:
-        loop = asyncio.get_event_loop()  # get loop here in async context
+        logger.info("Kafka consumer started, listening on recipes_processed")
+        loop = asyncio.get_event_loop()
         asyncio.create_task(asyncio.to_thread(kafka_listener, loop))
+    else:
+        logger.warning("Kafka consumer is None — ENABLE_KAFKA=%s, confluent_kafka installed=%s",
+                       ENABLE_KAFKA, Consumer is not None)
 
-# ---------------------------------------------------------------------------
 # Models
-# ---------------------------------------------------------------------------
 
 class RecommendBody(BaseModel):
     ingredients: str = Field(..., description="Comma-separated ingredients you have")
@@ -207,9 +214,8 @@ def _filter_search_phrases(phrases: list[str]) -> list[str]:
     return [p for p in phrases if len((p or "").strip()) >= 3]
 
 
-# ---------------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------------------------
+
 @app.get("/api/recent-recipes")
 def recent_recipes():
     try:
@@ -290,7 +296,9 @@ async def websocket_endpoint(websocket: WebSocket):
     connected_clients.add(websocket)
     try:
         while True:
-            await websocket.receive_text()  # blocks until client sends or disconnects
+            await websocket.receive()
+    except WebSocketDisconnect:
+        connected_clients.discard(websocket)
     except Exception:
         connected_clients.discard(websocket)
 

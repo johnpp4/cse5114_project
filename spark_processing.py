@@ -1,21 +1,8 @@
 """
-spark_processing.py
------------------
 reads recipe events from Kafka topic `recipes_raw`, parses + explodes them, 
 then upserts into two Snowflake tables:
     • RECIPES
     • RECIPE_INGREDIENTS
-
-Dependencies:
-    pip install pyspark snowflake-connector-python python-dotenv
-
-Spark packages (set via --packages or spark.jars.packages):
-    org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0
-    net.snowflake:spark-snowflake_2.13:3.1.0
-    net.snowflake:snowflake-jdbc:3.16.1
-
-Run with:
-    python spark_processing.py
 """
 
 import os
@@ -87,8 +74,9 @@ spark = (
         ]),
     )
     .config("spark.sql.shuffle.partitions", "4")
-    .config("spark.sql.streaming.metricsEnabled", "false")        # moved here
-    .config("spark.kafka.consumer.metrics.enabled", "false")      # add this
+    .config("spark.sql.streaming.metricsEnabled", "false")       
+    .config("spark.kafka.consumer.metrics.enabled", "false")     
+    .config("spark.sql.streaming.ui.enabled", "false")
     .config(
         "spark.driver.extraJavaOptions",
         "--add-opens=java.base/javax.security.auth=ALL-UNNAMED "
@@ -146,32 +134,6 @@ parsed = (
 )
 
 # Snowflake helpers
-def _get_snowflake_conn() -> snowflake.connector.SnowflakeConnection:
-    pkb = base64.b64decode(SNOWFLAKE_OPTIONS["pem_private_key"])
-    account = SNOWFLAKE_OPTIONS["sfURL"].replace(".snowflakecomputing.com", "")
-    return snowflake.connector.connect(
-        user=SNOWFLAKE_OPTIONS["sfUser"],
-        account=account,
-        private_key=pkb,
-        database=SNOWFLAKE_OPTIONS["sfDatabase"],
-        schema=SNOWFLAKE_OPTIONS["sfSchema"],
-        warehouse=SNOWFLAKE_OPTIONS["sfWarehouse"],
-    )
-
-def fetch_existing_links() -> set[str]:
-    try:
-        conn = _get_snowflake_conn()
-        cur  = conn.cursor()
-        cur.execute("SELECT LINK FROM RECIPES WHERE LINK IS NOT NULL")
-        links = {row[0] for row in cur.fetchall()}
-        cur.close()
-        conn.close()
-        logger.info("Fetched %d existing links from RECIPES", len(links))
-        return links
-    except Exception as e:
-        logger.warning("Could not fetch existing links (table may not exist yet): %s", e)
-        return set()
-
 def sf_write(df: DataFrame, table: str) -> None:
     (
         df.write
@@ -248,25 +210,6 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
             "ingredients",
             F.coalesce(F.col("ingredients"), F.array()))
     try:
-        # drop recipes whose link already exists in Snowflake ──
-        existing_links = fetch_existing_links()
- 
-        if existing_links:
-            existing_broadcast = spark.sparkContext.broadcast(existing_links)
- 
-            @F.udf(returnType="boolean")
-            def is_new_link(link: str) -> bool:
-                return link is not None and link not in existing_broadcast.value
- 
-            batch_df = batch_df.filter(is_new_link(F.col("link")))
- 
-        if batch_df.rdd.isEmpty():
-            logger.info("Batch %d — all recipes already exist in Snowflake, skipping writes", batch_id)
-            return
- 
-        new_count = batch_df.count()
-        logger.info("Batch %d — %d new recipe(s) after idempotency filter", batch_id, new_count)
-
         # recipes
         recipes_df = batch_df.select(
             F.col("recipe_id"),
@@ -289,29 +232,32 @@ def process_batch(batch_df: DataFrame, batch_id: int) -> None:
             .dropDuplicates(["recipe_id", "ingredient_id"])
         )
 
+        # send to recipes_processed kafka topic (uses recipe_id as the key and makes idempotent writes)
         def send_to_kafka(df):
             kafka_df = df.select(
+                F.col("recipe_id").alias("key"),
                 F.to_json(F.struct(
                     F.col("recipe_id"),
                     F.col("title"),
                     F.col("link"),
                     F.col("source"),
                     F.col("published_at"),
-                    F.col("ingested_at"),
+                    F.col("created_at"),
                 )).alias("value")
             )
             kafka_df.write \
                 .format("kafka") \
                 .option("kafka.bootstrap.servers", KAFKA_BROKER) \
                 .option("topic", "recipes_processed") \
+                .option("kafka.enable.idempotence", "true") \
                 .save()
-
-        # send to processed kafka topic
-        send_to_kafka(batch_df)
 
         # write to snowflake
         upsert_to_snowflake(recipes_df, "RECIPES", ["recipe_id"])
         upsert_to_snowflake(recipe_ingredients_df, "RECIPE_INGREDIENTS", ["recipe_id", "ingredient_id"])
+
+        # send to processed kafka topic
+        send_to_kafka(recipes_df)
 
     finally:
         cached_df.unpersist()

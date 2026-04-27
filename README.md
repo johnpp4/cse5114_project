@@ -2,12 +2,12 @@
 
 Snowflake-backed recipe recommendation app with a FastAPI backend and static web UI.
 
-## Quickstart (Snowflake-only)
+## Quickstart
 
 1. Create and activate a virtual environment.
 2. Install dependencies.
 3. Ensure your `.env` includes all required Snowflake variables.
-4. Start the API.
+4. Start the zookeeper, Kafka broker, ingestion.py, spark_processing.py, and the UI.
 5. Open the UI in your browser.
 
 ```bash
@@ -34,10 +34,6 @@ Private key (set exactly one preferred source):
 - `SNOWFLAKE_PRIVATE_KEY_B64` (recommended for portability)
 - `SNOWFLAKE_PRIVATE_KEY`
 - `SNOWFLAKE_PRIVATE_KEY_PATH` (supports absolute or repo-relative path)
-
-Optional:
-- `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`
-- `SNOWFLAKE_ROLE`
 
 ## Smoke Test
 

@@ -2,9 +2,6 @@
 RSS Ingestion Script:
 polls multiple RSS feeds, validates each entry is a real recipe by scraping the page with recipe-scrapers, 
 then pushes structured events to the Kafka topic `recipes_raw`.
-
-Dependencies:
-#   pip install feedparser kafka-python recipe-scrapers ingredient-parser-nlp
 """
 
 import json
@@ -234,12 +231,10 @@ def build_event(entry, feed_meta: dict, scraped: dict) -> dict:
         "recipe": {
             "recipe_id":   make_recipe_id(title, link),          # hashes normalized link
             "title":       title,
-            "link":        normalize_link(link),                  # bare link, matches ETL
+            "link":        normalize_link(link),                  
             "source":      feed_meta["source"],
             "published_at": published,
-            "ingredients": normalize_ingredients(                  # fully normalized
-                               scraped.get("ingredients", [])
-                           ),
+            "ingredients": normalize_ingredients(scraped.get("ingredients", [])),
         }
     }
 

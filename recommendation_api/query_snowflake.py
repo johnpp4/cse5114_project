@@ -1,11 +1,4 @@
 """
-snowflake_loader.py — per-request ingredient-filtered queries against Snowflake.
-
-Instead of loading all recipes at startup, each recommendation request sends
-the user's ingredients to Snowflake and retrieves only the recipes that contain
-at least one match. Snowflake does the JOIN and filtering; Python only scores
-and ranks the smaller result set.
-
 Required environment variables (matches .env in repo root):
     SNOWFLAKE_ACCOUNT
     SNOWFLAKE_USER
@@ -49,7 +42,7 @@ _REQUIRED_SNOWFLAKE_ENV = (
     "SNOWFLAKE_WAREHOUSE",
 )
 _SCHEMA_CACHE: dict[str, set[str]] = {}
-_MAX_CANDIDATES = int(os.environ.get("RECOMMEND_MAX_CANDIDATES", "5000"))
+_MAX_CANDIDATES = int(os.environ.get("RECOMMEND_MAX_CANDIDATES", "10000"))
 
 
 def validate_snowflake_env() -> None:
@@ -121,32 +114,20 @@ def _get_connection() -> snowflake.connector.SnowflakeConnection:
     return snowflake.connector.connect(**connect_kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# public API
 
 def fetch_candidates(user_phrases: list[str]) -> list[dict]:
-    """
-    Query Snowflake for recipes that contain at least one ingredient matching
-    any of the user's phrases, then fetch all ingredients for those recipes so
-    engine.py can compute the full match score.
-
-    Returns a list of recipe dicts shaped identically to what load_recipes_json()
-    previously produced, so engine.py::recommend() requires no changes.
-    """
     conn = _get_connection()
     try:
         return _fetch_candidates(conn, user_phrases)
     finally:
         conn.close()
 
-# ---------------------------------------------------------------------------
-# Internal
-# ---------------------------------------------------------------------------
+# internal
 
 def _build_ilike_clause(phrases: list[str]) -> tuple[str, list[str]]:
     conditions = " OR ".join("ri.INGREDIENT_ID ILIKE %s" for _ in phrases)
-    # INGREDIENT_ID usually uses underscores, so normalize user spaces.
+    # INGREDIENT_ID usually uses underscores, so normalize user spaces
     params = [f"%{p.replace(' ', '_')}%" for p in phrases]
     return conditions, params
 
@@ -185,15 +166,17 @@ def _fetch_candidates(
     # Use a subquery for candidate recipe IDs instead of a huge IN (...) list.
     # This avoids Snowflake's expression limit when many recipes match.
     candidate_subquery = f"""
-        SELECT DISTINCT ri.RECIPE_ID
+        SELECT ri.RECIPE_ID
         FROM RECIPE_INGREDIENTS ri
         WHERE ({ilike_clause})
+        GROUP BY ri.RECIPE_ID
+        ORDER BY COUNT(*) DESC
         LIMIT {_MAX_CANDIDATES}
     """
 
     cur = conn.cursor()
 
-    # --- Step 2: fetch full recipe metadata for candidates only ---
+    # fetch full recipe metadata for candidates only
     recipe_cols = _get_table_columns(conn, "RECIPES")
     title_col = choose_column(recipe_cols, ("TITLE", "RECIPE_NAME", "NAME"))
     rating_col = choose_column(recipe_cols, ("RATING", "AVG_RATING", "STARS"))
@@ -227,7 +210,7 @@ def _fetch_candidates(
         cur.close()
         return []
 
-    # --- Step 3: fetch ALL ingredients for candidate recipes ---
+    # fetch ALL ingredients for candidate recipes
     # engine.py needs the full ingredient list to compute match score
     # (matched vs missing), not just the ones that matched the search phrase.
     ingredient_cols = _get_table_columns(conn, "RECIPE_INGREDIENTS")
